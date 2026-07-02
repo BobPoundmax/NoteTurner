@@ -40,10 +40,16 @@ async def run_health_checks(
         checks["telegram"] = {"status": "skipped", "error": "Bot not initialized"}
 
     failed = [name for name, result in checks.items() if result.get("status") == "error"]
+    critical_failed = [
+        name
+        for name in failed
+        if name in {"database", "telegram"}
+    ]
     overall = "degraded" if failed else "ok"
 
     return {
         "status": overall,
+        "critical_ok": not critical_failed,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "checks": checks,
     }

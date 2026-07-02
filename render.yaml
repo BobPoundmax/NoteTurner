@@ -33,7 +33,7 @@ projects:
               - key: OPENROUTER_BASE_URL
                 value: https://openrouter.ai/api/v1
               - key: OPENROUTER_TEST_MODEL
-                value: google/gemma-2-9b-it:free
+                value: openai/gpt-5-nano
               - key: HOLLIHOP_SUBDOMAIN
                 sync: false
               - key: HOLLIHOP_AUTH_KEY

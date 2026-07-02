@@ -71,7 +71,7 @@ app = FastAPI(title="Note Turner", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict:
     result = await run_health_checks(bot=bot, openrouter=openrouter, hollihop=hollihop)
-    if result["status"] == "degraded":
+    if not result.get("critical_ok", True):
         raise HTTPException(status_code=503, detail=result)
     return result
 
