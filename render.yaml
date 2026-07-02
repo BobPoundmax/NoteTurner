@@ -1,0 +1,40 @@
+projects:
+  - name: Note Turner
+    environments:
+      - name: Production
+        databases:
+          - name: noteturner-db
+            plan: free
+            databaseName: noteturner
+            user: noteturner
+        services:
+          - type: web
+            name: noteturner
+            runtime: docker
+            plan: free
+            healthCheckPath: /health
+            envVars:
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: noteturner-db
+                  property: connectionString
+              - key: TELEGRAM_BOT_TOKEN
+                sync: false
+              - key: TELEGRAM_WEBHOOK_SECRET
+                generateValue: true
+              - key: ADMIN_TELEGRAM_ID
+                sync: false
+              - key: WEBHOOK_BASE_URL
+                sync: false
+              - key: BOT_MODE
+                value: webhook
+              - key: OPENROUTER_API_KEY
+                sync: false
+              - key: OPENROUTER_BASE_URL
+                value: https://openrouter.ai/api/v1
+              - key: OPENROUTER_TEST_MODEL
+                value: google/gemma-2-9b-it:free
+              - key: HOLLIHOP_SUBDOMAIN
+                sync: false
+              - key: HOLLIHOP_AUTH_KEY
+                sync: false
