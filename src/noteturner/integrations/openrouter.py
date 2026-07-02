@@ -72,7 +72,7 @@ class OpenRouterClient:
         try:
             reply = await self.chat_completion(
                 [{"role": "user", "content": "Reply with exactly: OK"}],
-                max_tokens=10,
+                max_tokens=16,
             )
             return {
                 "status": "ok",
