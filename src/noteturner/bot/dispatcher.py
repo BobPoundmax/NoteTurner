@@ -4,7 +4,8 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from noteturner.bot.handlers import admin, messages, ping
+from noteturner.bot.handlers import admin, assistant, collector, ping
+from noteturner.bot.middlewares.chat_access import ChatAccessMiddleware
 from noteturner.config.settings import Settings
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
@@ -32,7 +33,13 @@ def create_dispatcher(
     root_router = Router()
     root_router.include_router(ping.router)
     root_router.include_router(admin.router)
-    root_router.include_router(messages.router)
+
+    content_router = Router(name="content")
+    content_router.message.outer_middleware(ChatAccessMiddleware())
+    content_router.include_router(assistant.router)
+    content_router.include_router(collector.router)
+    root_router.include_router(content_router)
+
     dp.include_router(root_router)
 
     return dp
@@ -48,7 +55,7 @@ async def setup_webhook(bot: Bot, settings: Settings) -> None:
     await bot.set_webhook(
         url=settings.webhook_url,
         drop_pending_updates=True,
-        allowed_updates=["message", "edited_message"],
+        allowed_updates=["message", "edited_message", "callback_query"],
     )
     logger.info("Webhook set to %s", settings.webhook_url)
 

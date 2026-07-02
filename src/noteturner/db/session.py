@@ -1,4 +1,6 @@
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -29,6 +31,14 @@ async def close_db() -> None:
 
 def get_session_factory() -> async_sessionmaker[AsyncSession] | None:
     return _session_factory
+
+
+@asynccontextmanager
+async def session_scope() -> AsyncIterator[AsyncSession]:
+    if _session_factory is None:
+        raise RuntimeError("Database is not configured (DATABASE_URL not set)")
+    async with _session_factory() as session:
+        yield session
 
 
 async def check_database() -> dict[str, str]:

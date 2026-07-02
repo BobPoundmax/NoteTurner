@@ -1,0 +1,9 @@
+routing:
+  simple:
+    models: ["openai/gpt-5-nano"]
+    max_chars: 200
+    keywords: ["привет", "статус", "спасибо", "сколько", "когда", "кто", "где"]
+  complex:
+    models: ["openai/gpt-5", "openai/gpt-5-mini"]
+    keywords: ["проанализируй", "сравни", "посоветуй", "почему", "отчёт", "объясни"]
+  fallback: "openai/gpt-5-nano"

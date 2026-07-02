@@ -11,7 +11,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я <b>Note Turner</b> — корпоративный ассистент «Виртуозы».\n\n"
         "• В личке — просто напишите вопрос.\n"
         "• В группе — упомяните меня через @.\n\n"
-        "Команды: /ping, /status (admin)"
+        "Команды: /ping, /status (admin), /admin (admin), /admins (admin)"
     )
 
 
