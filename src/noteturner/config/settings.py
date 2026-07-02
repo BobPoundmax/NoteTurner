@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     hollihop_subdomain: str = ""
     hollihop_auth_key: str = ""
 
+    @field_validator("hollihop_subdomain", mode="before")
+    @classmethod
+    def normalize_hollihop_subdomain(cls, value: str) -> str:
+        if not value:
+            return value
+        cleaned = value.strip().rstrip("/")
+        for prefix in ("https://", "http://"):
+            if cleaned.lower().startswith(prefix):
+                cleaned = cleaned[len(prefix) :]
+        if cleaned.lower().endswith(".t8s.ru"):
+            cleaned = cleaned[: -len(".t8s.ru")]
+        return cleaned.strip("/")
+
     @field_validator("database_url", mode="before")
     @classmethod
     def normalize_database_url(cls, value: str) -> str:
