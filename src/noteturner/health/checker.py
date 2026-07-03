@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from aiogram import Bot
 
 from noteturner.db.session import check_database
+from noteturner.debug_session import agent_log
 from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
@@ -32,7 +33,23 @@ async def run_health_checks(
             "error": "HOLLIHOP_SUBDOMAIN / HOLLIHOP_AUTH_KEY not set",
         }
 
+    # region agent log
+    agent_log(
+        location="checker.py:run_health_checks",
+        message="before gdrive health check",
+        data={},
+        hypothesis_id="H1",
+    )
+    # endregion
     checks["gdrive"] = await gdrive.health_check()
+    # region agent log
+    agent_log(
+        location="checker.py:run_health_checks",
+        message="after gdrive health check",
+        data={"gdrive_status": checks["gdrive"].get("status")},
+        hypothesis_id="H1",
+    )
+    # endregion
 
     if bot is not None:
         try:

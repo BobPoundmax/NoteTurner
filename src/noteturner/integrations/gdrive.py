@@ -2,11 +2,13 @@ import asyncio
 import io
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from noteturner.config.settings import Settings
+from noteturner.debug_session import agent_log
 
 logger = logging.getLogger(__name__)
 
@@ -62,29 +64,64 @@ class GoogleDriveClient:
         self._settings = settings
         self._drive: Any = None
         self._sheets: Any = None
+        self._lock = threading.RLock()
 
     @property
     def is_configured(self) -> bool:
-        return self._settings.gdrive_is_configured
+        configured = self._settings.gdrive_is_configured
+        # region agent log
+        agent_log(
+            location="gdrive.py:is_configured",
+            message="gdrive configured check",
+            data={
+                "configured": configured,
+                "has_folder_id": bool(self._settings.gdrive_folder_id.strip()),
+                "has_project_id": bool(self._settings.google_project_id.strip()),
+                "has_email": bool(self._settings.google_service_account_email.strip()),
+                "has_private_key": bool(self._settings.google_private_key.strip()),
+            },
+            hypothesis_id="H4",
+        )
+        # endregion
+        return configured
 
     def _build_services(self) -> tuple[Any, Any]:
-        if self._drive is not None and self._sheets is not None:
+        with self._lock:
+            if self._drive is not None and self._sheets is not None:
+                return self._drive, self._sheets
+
+            # region agent log
+            agent_log(
+                location="gdrive.py:_build_services",
+                message="building google drive services",
+                data={},
+                hypothesis_id="H1",
+            )
+            # endregion
+
+            # Imported lazily so the module can be imported without the Google
+            # client libraries installed (e.g. in unit tests that only touch helpers).
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+
+            try:
+                info = self._settings.google_service_account_info()
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise GoogleDriveError(f"Invalid Google service account settings: {exc}") from exc
+
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            self._drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
+            self._sheets = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+
+            # region agent log
+            agent_log(
+                location="gdrive.py:_build_services",
+                message="google drive services built",
+                data={},
+                hypothesis_id="H1",
+            )
+            # endregion
             return self._drive, self._sheets
-
-        # Imported lazily so the module can be imported without the Google
-        # client libraries installed (e.g. in unit tests that only touch helpers).
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-
-        try:
-            info = self._settings.google_service_account_info()
-        except (ValueError, json.JSONDecodeError) as exc:
-            raise GoogleDriveError(f"Invalid Google service account settings: {exc}") from exc
-
-        credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-        self._drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
-        self._sheets = build("sheets", "v4", credentials=credentials, cache_discovery=False)
-        return self._drive, self._sheets
 
     async def list_files(self) -> list[DriveFile]:
         if not self.is_configured:
@@ -95,6 +132,18 @@ class GoogleDriveClient:
         return await asyncio.to_thread(self._list_files_sync, self._settings.gdrive_folder_id)
 
     def _list_files_sync(self, folder_id: str) -> list[DriveFile]:
+        with self._lock:
+            return self._list_files_sync_locked(folder_id)
+
+    def _list_files_sync_locked(self, folder_id: str) -> list[DriveFile]:
+        # region agent log
+        agent_log(
+            location="gdrive.py:_list_files_sync",
+            message="list_files start",
+            data={"folder_id_len": len(folder_id)},
+            hypothesis_id="H1",
+        )
+        # endregion
         drive, _ = self._build_services()
         collected: list[DriveFile] = []
         stack = [folder_id]
@@ -132,7 +181,49 @@ class GoogleDriveClient:
                 if not page_token:
                     break
 
+        # region agent log
+        agent_log(
+            location="gdrive.py:_list_files_sync",
+            message="list_files done",
+            data={"files_count": len(collected), "visited_folders": len(visited)},
+            hypothesis_id="H1",
+        )
+        # endregion
         return collected
+
+    def _probe_folder_sync(self, folder_id: str) -> int:
+        """Lightweight health probe: one page, no recursion."""
+        with self._lock:
+            # region agent log
+            agent_log(
+                location="gdrive.py:_probe_folder_sync",
+                message="probe start",
+                data={"folder_id_len": len(folder_id)},
+                hypothesis_id="H2",
+            )
+            # endregion
+            drive, _ = self._build_services()
+            response = (
+                drive.files()
+                .list(
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    fields="files(id)",
+                    pageSize=1,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
+            count = len(response.get("files", []))
+            # region agent log
+            agent_log(
+                location="gdrive.py:_probe_folder_sync",
+                message="probe done",
+                data={"sample_count": count},
+                hypothesis_id="H2",
+            )
+            # endregion
+            return count
 
     async def extract_text(self, file: DriveFile) -> str:
         return await asyncio.to_thread(self._extract_text_sync, file)
@@ -182,10 +273,28 @@ class GoogleDriveClient:
                 "error": "GDRIVE_FOLDER_ID or Google service account env vars not set",
             }
         try:
-            files = await self.list_files()
+            # region agent log
+            agent_log(
+                location="gdrive.py:health_check",
+                message="health_check start",
+                data={},
+                hypothesis_id="H1",
+            )
+            # endregion
+            sample_count = await asyncio.to_thread(
+                self._probe_folder_sync, self._settings.gdrive_folder_id
+            )
+            # region agent log
+            agent_log(
+                location="gdrive.py:health_check",
+                message="health_check ok",
+                data={"sample_count": sample_count},
+                hypothesis_id="H1",
+            )
+            # endregion
             return {
                 "status": "ok",
-                "files_count": len(files),
+                "files_count": sample_count,
                 "latency_ms": int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
             }
         except GoogleDriveError as exc:
