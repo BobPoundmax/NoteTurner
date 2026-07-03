@@ -69,3 +69,10 @@ async def search_chunks(
 async def count_doc_chunks(session: AsyncSession) -> int:
     result = await session.execute(select(func.count()).select_from(DocChunk))
     return int(result.scalar_one())
+
+
+async def count_doc_chunks_by_source(session: AsyncSession) -> dict[str, int]:
+    result = await session.execute(
+        select(DocChunk.source, func.count()).group_by(DocChunk.source)
+    )
+    return {source: int(count) for source, count in result.all()}

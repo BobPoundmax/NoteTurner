@@ -9,10 +9,15 @@ class PromptBuilder:
         self.system: str = assistant.get(
             "system", "Ты — корпоративный ассистент компании «Виртуозы»."
         ).strip()
+        self.admin_note: str = assistant.get("admin_note", "").strip()
         self.disclaimer: str = assistant.get("disclaimer", "").strip()
 
-    def build(self, question: str, context: list[SourceChunk]) -> list[dict[str, str]]:
+    def build(
+        self, question: str, context: list[SourceChunk], *, is_admin: bool = False
+    ) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = [{"role": "system", "content": self.system}]
+        if is_admin and self.admin_note:
+            messages.append({"role": "system", "content": self.admin_note})
         if context:
             blocks = "\n\n".join(
                 f"[{i + 1}] Источник: {chunk.source}\n{chunk.text}"

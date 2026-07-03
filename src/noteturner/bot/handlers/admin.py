@@ -12,7 +12,7 @@ from noteturner.db.repositories.chats import count_chats_by_role, upsert_chat
 from noteturner.db.repositories.collector import count_collector_messages
 from noteturner.db.repositories.query_logs import count_query_logs
 from noteturner.db.repositories.sync import count_raw_records, recent_sync_runs
-from noteturner.db.repositories.vectors import count_doc_chunks
+from noteturner.db.repositories.vectors import count_doc_chunks_by_source
 from noteturner.db.session import check_database, session_scope
 from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
@@ -300,20 +300,27 @@ async def cb_cancel(query: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "admin:sync_crm")
-async def cb_sync_crm(query: CallbackQuery, settings: Settings, hollihop: HollihopClient) -> None:
+async def cb_sync_crm(
+    query: CallbackQuery,
+    settings: Settings,
+    hollihop: HollihopClient,
+    openrouter: OpenRouterClient,
+) -> None:
     if not await is_admin(query.from_user.id, settings):
         await query.answer("Только для администратора.", show_alert=True)
         return
     await query.answer("Запускаю выгрузку CRM…")
-    await query.message.answer("⏳ Загружаю данные из Hollihop…")
+    await query.message.answer("⏳ Загружаю и векторизую данные из Hollihop…")
 
-    result = await run_hollihop_sync(hollihop)
+    result = await run_hollihop_sync(hollihop, openrouter)
 
     if result.status == "ok":
         by_type = ", ".join(f"{k}: {v}" for k, v in result.per_type.items()) or "нет записей"
+        note = f"\n⚠️ {result.error}" if result.error else ""
         await query.message.answer(
             f"✅ CRM sync завершён. Обработано {result.records_processed} "
-            f"(из них финансовых {result.financial_processed}). {by_type}."
+            f"(из них финансовых {result.financial_processed}), "
+            f"векторизовано {result.chunks_processed}. {by_type}.{note}"
         )
     else:
         await query.message.answer(f"❌ Ошибка CRM sync: {result.error}")
@@ -357,7 +364,7 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
             roles = await count_chats_by_role(session)
             collector_count = await count_collector_messages(session)
             raw_count = await count_raw_records(session)
-            chunk_count = await count_doc_chunks(session)
+            chunks_by_source = await count_doc_chunks_by_source(session)
             query_count = await count_query_logs(session)
             runs = await recent_sync_runs(session, limit=3)
     except RuntimeError:
@@ -371,7 +378,8 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
         f"Чаты: assistant {roles.get('assistant', 0)}, collector {roles.get('collector', 0)}",
         f"Сообщений collector: {collector_count}",
         f"CRM записей (raw): {raw_count}",
-        f"Векторных чанков (Drive): {chunk_count}",
+        f"Векторных чанков: Drive {chunks_by_source.get('gdrive', 0)}, "
+        f"CRM {chunks_by_source.get('hollihop', 0)}",
         f"Запросов к ассистенту: {query_count}",
     ]
     if runs:

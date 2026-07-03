@@ -46,6 +46,11 @@ class DriveFile:
         return RECORD_TYPE_BY_MIME.get(self.mime_type, "unknown")
 
 
+def parse_gdrive_root_ids(raw: str) -> list[str]:
+    """Backward-compatible alias for Settings.parse_gdrive_root_ids."""
+    return Settings.parse_gdrive_root_ids(raw)
+
+
 def _rows_to_text(sheet_title: str, rows: list[list[Any]]) -> str:
     """Serialize spreadsheet rows into a compact text block for embedding."""
     lines = [f"# {sheet_title}"]
@@ -95,15 +100,64 @@ class GoogleDriveClient:
                 "Google Drive is not configured "
                 "(GDRIVE_FOLDER_ID + GOOGLE_PROJECT_ID / GOOGLE_SERVICE_ACCOUNT_EMAIL / …)"
             )
-        return await asyncio.to_thread(self._list_files_sync, self._settings.gdrive_folder_id)
+        root_ids = self._settings.gdrive_root_ids
+        if not root_ids:
+            raise GoogleDriveError("GDRIVE_FOLDER_ID is empty or invalid")
+        return await asyncio.to_thread(self._list_files_sync, root_ids)
 
-    def _list_files_sync(self, folder_id: str) -> list[DriveFile]:
+    def _list_files_sync(self, root_ids: list[str]) -> list[DriveFile]:
         with self._lock:
-            return self._list_files_sync_locked(folder_id)
+            return self._list_files_sync_locked(root_ids)
 
-    def _list_files_sync_locked(self, folder_id: str) -> list[DriveFile]:
+    def _list_files_sync_locked(self, root_ids: list[str]) -> list[DriveFile]:
         drive, _ = self._build_services()
         collected: list[DriveFile] = []
+        seen_file_ids: set[str] = set()
+        for root_id in root_ids:
+            self._collect_from_root(drive, root_id, collected, seen_file_ids)
+        return collected
+
+    def _collect_from_root(
+        self,
+        drive: Any,
+        root_id: str,
+        collected: list[DriveFile],
+        seen_file_ids: set[str],
+    ) -> None:
+        meta = (
+            drive.files()
+            .get(
+                fileId=root_id,
+                fields="id,name,mimeType",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        mime = meta["mimeType"]
+        if mime == MIME_FOLDER:
+            self._walk_folder(drive, root_id, collected, seen_file_ids)
+        elif mime in RECORD_TYPE_BY_MIME:
+            file_id = meta["id"]
+            if file_id not in seen_file_ids:
+                seen_file_ids.add(file_id)
+                collected.append(
+                    DriveFile(id=file_id, name=meta["name"], mime_type=mime)
+                )
+        else:
+            logger.info(
+                "Skipping unsupported Drive root %s (%s): %s",
+                meta.get("name"),
+                root_id,
+                mime,
+            )
+
+    def _walk_folder(
+        self,
+        drive: Any,
+        folder_id: str,
+        collected: list[DriveFile],
+        seen_file_ids: set[str],
+    ) -> None:
         stack = [folder_id]
         visited: set[str] = set()
 
@@ -131,15 +185,16 @@ class GoogleDriveClient:
                     mime = item["mimeType"]
                     if mime == MIME_FOLDER:
                         stack.append(item["id"])
-                    else:
-                        collected.append(
-                            DriveFile(id=item["id"], name=item["name"], mime_type=mime)
-                        )
+                    elif mime in RECORD_TYPE_BY_MIME:
+                        file_id = item["id"]
+                        if file_id not in seen_file_ids:
+                            seen_file_ids.add(file_id)
+                            collected.append(
+                                DriveFile(id=file_id, name=item["name"], mime_type=mime)
+                            )
                 page_token = response.get("nextPageToken")
                 if not page_token:
                     break
-
-        return collected
 
     def _probe_folder_sync(self, folder_id: str) -> str:
         """Lightweight health probe: verify folder is reachable (no full listing)."""
@@ -204,12 +259,17 @@ class GoogleDriveClient:
                 "error": "GDRIVE_FOLDER_ID or Google service account env vars not set",
             }
         try:
-            folder_name = await asyncio.to_thread(
-                self._probe_folder_sync, self._settings.gdrive_folder_id
+            root_ids = self._settings.gdrive_root_ids
+            if not root_ids:
+                return {"status": "error", "error": "GDRIVE_FOLDER_ID is empty or invalid"}
+            names = await asyncio.gather(
+                *[asyncio.to_thread(self._probe_folder_sync, root_id) for root_id in root_ids]
             )
+            label = ", ".join(names) if len(names) <= 3 else f"{names[0]} +{len(names) - 1}"
             return {
                 "status": "ok",
-                "folder_name": folder_name,
+                "folder_name": label,
+                "roots_count": len(root_ids),
                 "latency_ms": int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
             }
         except GoogleDriveError as exc:

@@ -42,6 +42,23 @@ class Settings(BaseSettings):
     # Filename keywords marking a file as financial (comma-separated, case-insensitive).
     financial_keywords: str = "финанс,оплат,payment,бюджет,budget,зарплат,выручк,revenue"
 
+    @staticmethod
+    def parse_gdrive_root_ids(raw: str) -> list[str]:
+        """Parse comma-separated Drive root IDs or URLs (folders, projects, files)."""
+        ids: list[str] = []
+        for part in raw.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            for marker in ("/folders/", "/project/", "/file/d/"):
+                if marker in token:
+                    token = token.split(marker, 1)[1]
+                    break
+            token = token.split("/")[0].split("?")[0].strip()
+            if token and token not in ids:
+                ids.append(token)
+        return ids
+
     @field_validator("google_private_key", mode="before")
     @classmethod
     def normalize_google_private_key(cls, value: str) -> str:
@@ -84,7 +101,7 @@ class Settings(BaseSettings):
 
     @property
     def gdrive_is_configured(self) -> bool:
-        if not self.gdrive_folder_id.strip():
+        if not self.gdrive_root_ids:
             return False
         if self.google_service_account_json.strip():
             return True
@@ -95,6 +112,10 @@ class Settings(BaseSettings):
             and self.google_private_key_id.strip()
             and self.google_client_id.strip()
         )
+
+    @property
+    def gdrive_root_ids(self) -> list[str]:
+        return Settings.parse_gdrive_root_ids(self.gdrive_folder_id)
 
     def google_service_account_info(self) -> dict[str, str]:
         """Build a service-account dict for google-auth from env vars."""

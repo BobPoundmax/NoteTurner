@@ -17,6 +17,38 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# Phrases signalling that an admin wants to trigger data collection/sync.
+# Handled directly (pointing to /admin) instead of guessing via the LLM.
+SYNC_INTENT_PHRASES: tuple[str, ...] = (
+    "сбор данных",
+    "собрать данные",
+    "собери данные",
+    "запусти сбор",
+    "запустить сбор",
+    "обнови данные",
+    "обновить данные",
+    "обнови crm",
+    "обновить crm",
+    "загрузи crm",
+    "выгрузи crm",
+    "загрузи google drive",
+    "загрузи диск",
+    "синхрониз",
+)
+
+SYNC_INTENT_REPLY = (
+    "Сбор данных запускается вручную из меню <b>/admin</b>:\n"
+    "• <b>Загрузить CRM</b> — данные Hollihop (лиды, ученики, платежи);\n"
+    "• <b>Загрузить Google Drive</b> — документы и таблицы.\n\n"
+    "После загрузки данные векторизуются и я смогу опираться на них в ответах. "
+    "Автоматической синхронизации по расписанию пока нет."
+)
+
+
+def is_sync_intent(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in SYNC_INTENT_PHRASES)
+
 
 async def _log_query(telegram_chat_id: int, question: str, model: str | None) -> None:
     try:
@@ -59,7 +91,13 @@ async def handle_assistant_message(
     user_id = message.from_user.id if message.from_user else None
     admin = await is_admin(user_id, settings)
 
-    retriever = VectorRetriever(openrouter) if settings.gdrive_is_configured else None
+    if admin and is_sync_intent(user_text):
+        await message.answer(SYNC_INTENT_REPLY)
+        return
+
+    # doc_chunks may hold Google Drive and/or CRM vectors, so retrieve whenever
+    # embeddings are available (OpenRouter is already confirmed configured above).
+    retriever = VectorRetriever(openrouter)
 
     try:
         result = await Answerer(openrouter, retriever=retriever).answer(user_text, is_admin=admin)

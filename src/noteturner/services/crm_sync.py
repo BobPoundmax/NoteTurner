@@ -4,12 +4,15 @@ from typing import Any
 
 from noteturner.db.models import SyncRun
 from noteturner.db.repositories.sync import create_sync_run, finish_sync_run, upsert_raw_record
+from noteturner.db.repositories.vectors import ChunkInput, replace_file_chunks
 from noteturner.db.session import session_scope
 from noteturner.integrations.hollihop import HollihopClient, HollihopError
+from noteturner.integrations.openrouter import OpenRouterClient, OpenRouterError
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "hollihop"
+EMBED_BATCH = 64
 
 # Hollihop endpoints to sync. Financial records (is_financial=True) are stored
 # but flagged so they can be restricted to admins at retrieval time.
@@ -30,8 +33,19 @@ class CrmSyncResult:
     status: str = "ok"
     records_processed: int = 0
     financial_processed: int = 0
+    chunks_processed: int = 0
     per_type: dict[str, int] = field(default_factory=dict)
     error: str | None = None
+
+
+@dataclass
+class SyncedRecord:
+    """A raw record staged for vectorization into the shared doc_chunks store."""
+
+    external_id: str
+    record_type: str
+    content: str
+    is_financial: bool
 
 
 def _serialize_record(record_type: str, record: dict[str, Any]) -> str:
@@ -50,36 +64,95 @@ async def _sync_endpoint(
     function_name: str,
     result_key: str,
     is_financial: bool,
-) -> int:
-    processed = 0
+) -> list[SyncedRecord]:
+    synced: list[SyncedRecord] = []
     skip = 0
     async with session_scope() as session:
-        while processed < MAX_RECORDS_PER_TYPE:
+        while len(synced) < MAX_RECORDS_PER_TYPE:
             data = await hollihop.call(function_name, take=PAGE_SIZE, skip=skip)
             items = data.get(result_key) or []
             if not items:
                 break
             for record in items:
                 external_id = record.get("Id")
+                content = _serialize_record(record_type, record)
                 await upsert_raw_record(
                     session,
                     source=SOURCE,
                     record_type=record_type,
                     external_id=str(external_id) if external_id is not None else None,
-                    content=_serialize_record(record_type, record),
+                    content=content,
                     payload=record,
                     is_financial=is_financial,
                 )
-                processed += 1
+                if external_id is not None:
+                    synced.append(
+                        SyncedRecord(
+                            external_id=str(external_id),
+                            record_type=record_type,
+                            content=content,
+                            is_financial=is_financial,
+                        )
+                    )
             await session.commit()
             if len(items) < PAGE_SIZE:
                 break
             skip += PAGE_SIZE
-    return processed
+    return synced
 
 
-async def run_hollihop_sync(hollihop: HollihopClient) -> CrmSyncResult:
-    """Fetch whitelisted Hollihop records into raw_records, tracked by a sync_run."""
+async def _embed_all(openrouter: OpenRouterClient, texts: list[str]) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    for i in range(0, len(texts), EMBED_BATCH):
+        batch = texts[i : i + EMBED_BATCH]
+        vectors.extend(await openrouter.embed(batch))
+    return vectors
+
+
+async def _vectorize_records(
+    openrouter: OpenRouterClient, records: list[SyncedRecord]
+) -> int:
+    """Embed synced CRM records into the shared doc_chunks store (one chunk each).
+
+    External ids are namespaced by record type so that, for example, lead #5 and
+    student #5 do not overwrite each other's chunk (they share ``Id`` in Hollihop).
+    """
+    if not records:
+        return 0
+
+    embeddings = await _embed_all(openrouter, [r.content for r in records])
+    stored = 0
+    async with session_scope() as session:
+        for record, embedding in zip(records, embeddings):
+            await replace_file_chunks(
+                session,
+                source=SOURCE,
+                external_id=f"{record.record_type}:{record.external_id}",
+                chunks=[
+                    ChunkInput(
+                        content=record.content,
+                        embedding=embedding,
+                        chunk_index=0,
+                        title=f"CRM {record.record_type} #{record.external_id}",
+                        record_type=record.record_type,
+                        is_financial=record.is_financial,
+                        payload={"crm_type": record.record_type},
+                    )
+                ],
+            )
+            stored += 1
+    return stored
+
+
+async def run_hollihop_sync(
+    hollihop: HollihopClient, openrouter: OpenRouterClient | None = None
+) -> CrmSyncResult:
+    """Fetch whitelisted Hollihop records into raw_records, tracked by a sync_run.
+
+    When ``openrouter`` is configured, synced records are also embedded into the
+    shared ``doc_chunks`` store so the assistant can retrieve CRM data (including
+    financial records, restricted to admins) alongside Google Drive documents.
+    """
     result = CrmSyncResult()
 
     if not hollihop.is_configured:
@@ -91,15 +164,18 @@ async def run_hollihop_sync(hollihop: HollihopClient) -> CrmSyncResult:
         sync_run = await create_sync_run(session, source=SOURCE)
         run_id = sync_run.id
 
+    synced: list[SyncedRecord] = []
     try:
         for record_type, function_name, result_key, is_financial in ENDPOINTS:
-            count = await _sync_endpoint(
+            records = await _sync_endpoint(
                 hollihop,
                 record_type=record_type,
                 function_name=function_name,
                 result_key=result_key,
                 is_financial=is_financial,
             )
+            synced.extend(records)
+            count = len(records)
             result.per_type[record_type] = count
             result.records_processed += count
             if is_financial:
@@ -111,6 +187,13 @@ async def run_hollihop_sync(hollihop: HollihopClient) -> CrmSyncResult:
         logger.exception("Hollihop sync failed")
         result.status = "error"
         result.error = str(exc)
+
+    if result.status == "ok" and openrouter is not None and openrouter.is_configured:
+        try:
+            result.chunks_processed = await _vectorize_records(openrouter, synced)
+        except OpenRouterError as exc:
+            logger.warning("CRM vectorization failed: %s", exc)
+            result.error = f"Записи сохранены, но векторизация не удалась: {exc}"
 
     async with session_scope() as session:
         sync_run = await session.get(SyncRun, run_id)

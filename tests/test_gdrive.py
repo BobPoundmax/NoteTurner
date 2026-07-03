@@ -1,6 +1,7 @@
 from noteturner.config.settings import Settings
 from noteturner.integrations.gdrive import (
     MIME_DOC,
+    MIME_FOLDER,
     MIME_SHEET,
     DriveFile,
     GoogleDriveClient,
@@ -44,6 +45,34 @@ class _FakeSheets:
         return _FakeSpreadsheets()
 
 
+class _FakeListFiles:
+    def __init__(self, tree: dict) -> None:
+        self._tree = tree
+
+    def get(self, fileId, fields, supportsAllDrives=True):  # noqa: N803
+        return _Exec(self._tree["meta"][fileId])
+
+    def list(
+        self,
+        q,
+        fields,
+        pageSize,  # noqa: N803
+        pageToken=None,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ):
+        parent = q.split("'")[1]
+        return _Exec({"files": self._tree["children"].get(parent, [])})
+
+
+class _FakeDriveWithTree:
+    def __init__(self, tree: dict) -> None:
+        self._tree = tree
+
+    def files(self):
+        return _FakeListFiles(self._tree)
+
+
 def _client_with_fakes() -> GoogleDriveClient:
     client = GoogleDriveClient(Settings())
     client._drive = _FakeDrive()
@@ -76,3 +105,21 @@ def test_extract_sheet_text() -> None:
     text = client._extract_text_sync(file)
     assert "# Лист1" in text
     assert "a | b" in text
+
+
+def test_list_files_multiple_roots() -> None:
+    tree = {
+        "meta": {
+            "folder1": {"id": "folder1", "name": "Folder", "mimeType": MIME_FOLDER},
+            "doc1": {"id": "doc1", "name": "In folder", "mimeType": MIME_DOC},
+            "doc2": {"id": "doc2", "name": "Standalone", "mimeType": MIME_DOC},
+        },
+        "children": {
+            "folder1": [{"id": "doc1", "name": "In folder", "mimeType": MIME_DOC}],
+        },
+    }
+    client = GoogleDriveClient(Settings(gdrive_folder_id="folder1,doc2"))
+    client._drive = _FakeDriveWithTree(tree)
+    client._sheets = _FakeSheets()
+    files = client._list_files_sync_locked(["folder1", "doc2"])
+    assert {f.id for f in files} == {"doc1", "doc2"}

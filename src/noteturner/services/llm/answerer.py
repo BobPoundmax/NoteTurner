@@ -42,7 +42,7 @@ class Answerer:
     async def answer(self, question: str, *, is_admin: bool) -> AnswerResult:
         tier = self._router.classify(question)
         context = await self._retriever.retrieve(question, include_financial=is_admin)
-        messages = self._prompts.build(question, context)
+        messages = self._prompts.build(question, context, is_admin=is_admin)
 
         models = self._router.models_for(tier)
         last_error: OpenRouterError | None = None

@@ -39,3 +39,17 @@ def test_gdrive_configured_from_json_fallback() -> None:
 def test_gdrive_not_configured_without_credentials() -> None:
     settings = Settings(gdrive_folder_id="folder")
     assert settings.gdrive_is_configured is False
+
+
+def test_gdrive_root_ids_comma_separated() -> None:
+    settings = Settings(gdrive_folder_id="abc, def, abc")
+    assert settings.gdrive_root_ids == ["abc", "def"]
+
+
+def test_gdrive_root_ids_from_urls() -> None:
+    raw = (
+        "https://drive.google.com/drive/folders/FOLDER1,"
+        "https://drive.google.com/drive/project/PROJECT1,"
+        "https://drive.google.com/file/d/FILE1/view"
+    )
+    assert Settings.parse_gdrive_root_ids(raw) == ["FOLDER1", "PROJECT1", "FILE1"]
