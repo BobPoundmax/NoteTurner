@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -44,6 +45,19 @@ class CrmSyncResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class CrmSyncProgress:
+    stage: str
+    record_type: str | None = None
+    records_processed: int = 0
+    chunks_processed: int = 0
+    page_index: int = 0
+    message: str | None = None
+
+
+ProgressReporter = Callable[[CrmSyncProgress], Awaitable[None]]
+
+
 @dataclass
 class VectorChunkSpec:
     content: str
@@ -82,6 +96,14 @@ def get_scope_record_types(scope: str) -> tuple[str, ...]:
 
 def _current_utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+async def _report_progress(
+    progress: ProgressReporter | None,
+    update: CrmSyncProgress,
+) -> None:
+    if progress is not None:
+        await progress(update)
 
 
 def _clean(value: Any) -> str | None:
@@ -675,10 +697,12 @@ async def _sync_entity(
     hollihop: HollihopClient,
     *,
     config: EntitySyncConfig,
+    progress: ProgressReporter | None = None,
 ) -> tuple[list[SyncedRecord], str | None, dict[str, Any], int]:
     records: list[SyncedRecord] = []
     skip = 0
     processed = 0
+    page_index = 0
 
     async with session_scope() as session:
         cursor = await get_sync_cursor(session, source=SOURCE, record_type=config.record_type)
@@ -703,6 +727,7 @@ async def _sync_entity(
                 take=config.page_size,
                 skip=skip,
             )
+            page_index += 1
             items = data.get(config.result_key) or []
             page_count = len(items)
             next_cursor, next_meta = _next_cursor_value(
@@ -738,6 +763,19 @@ async def _sync_entity(
                     break
 
             await session.commit()
+            await _report_progress(
+                progress,
+                CrmSyncProgress(
+                    stage="page_fetched",
+                    record_type=config.record_type,
+                    records_processed=processed,
+                    page_index=page_index,
+                    message=(
+                        f"⏳ CRM: загружено {processed} записей типа {config.record_type} "
+                        f"({page_index} стр., последняя +{page_count})."
+                    ),
+                ),
+            )
             logger.info(
                 "CRM sync page fetched record_type=%s skip=%s fetched=%s processed_total=%s",
                 config.record_type,
@@ -800,6 +838,7 @@ async def run_hollihop_sync(
     openrouter: OpenRouterClient | None = None,
     *,
     record_types: tuple[str, ...] | None = None,
+    progress: ProgressReporter | None = None,
 ) -> CrmSyncResult:
     """Fetch Hollihop entities into raw_records and doc_chunks.
 
@@ -833,14 +872,38 @@ async def run_hollihop_sync(
     try:
         for config in configs:
             logger.info("CRM sync phase started record_type=%s", config.record_type)
+            await _report_progress(
+                progress,
+                CrmSyncProgress(
+                    stage="entity_started",
+                    record_type=config.record_type,
+                    records_processed=result.records_processed,
+                    chunks_processed=result.chunks_processed,
+                    message=f"⏳ CRM: начинаю выгрузку типа {config.record_type}.",
+                ),
+            )
             records, next_cursor, next_meta, processed = await _sync_entity(
                 hollihop,
                 config=config,
+                progress=progress,
             )
             result.per_type[config.record_type] = processed
             result.records_processed += processed
             if config.is_financial:
                 result.financial_processed += processed
+            await _report_progress(
+                progress,
+                CrmSyncProgress(
+                    stage="entity_fetched",
+                    record_type=config.record_type,
+                    records_processed=result.records_processed,
+                    chunks_processed=result.chunks_processed,
+                    message=(
+                        f"⏳ CRM: тип {config.record_type} загружен, записей {processed}. "
+                        f"Всего записей {result.records_processed}."
+                    ),
+                ),
+            )
             logger.info(
                 "CRM sync phase fetched record_type=%s records=%s financial=%s next_cursor=%s",
                 config.record_type,
@@ -852,6 +915,19 @@ async def run_hollihop_sync(
             if vectorization_enabled:
                 try:
                     chunk_candidates = sum(len(record.vector_chunks) for record in records)
+                    await _report_progress(
+                        progress,
+                        CrmSyncProgress(
+                            stage="vectorizing",
+                            record_type=config.record_type,
+                            records_processed=result.records_processed,
+                            chunks_processed=result.chunks_processed,
+                            message=(
+                                f"⏳ CRM: векторизую {len(records)} записей типа "
+                                f"{config.record_type} ({chunk_candidates} чанков-кандидатов)."
+                            ),
+                        ),
+                    )
                     logger.info(
                         "CRM vectorization started record_type=%s records=%s chunk_candidates=%s",
                         config.record_type,
@@ -860,6 +936,19 @@ async def run_hollihop_sync(
                     )
                     chunks_added = await _vectorize_records(openrouter, records)
                     result.chunks_processed += chunks_added
+                    await _report_progress(
+                        progress,
+                        CrmSyncProgress(
+                            stage="vectorized",
+                            record_type=config.record_type,
+                            records_processed=result.records_processed,
+                            chunks_processed=result.chunks_processed,
+                            message=(
+                                f"⏳ CRM: готово {config.record_type}, добавлено {chunks_added} чанков. "
+                                f"Всего чанков {result.chunks_processed}."
+                            ),
+                        ),
+                    )
                     logger.info(
                         "CRM vectorization finished record_type=%s chunks_added=%s chunks_total=%s",
                         config.record_type,
@@ -886,6 +975,19 @@ async def run_hollihop_sync(
                 config.record_type,
                 processed,
                 result.chunks_processed,
+            )
+            await _report_progress(
+                progress,
+                CrmSyncProgress(
+                    stage="entity_finished",
+                    record_type=config.record_type,
+                    records_processed=result.records_processed,
+                    chunks_processed=result.chunks_processed,
+                    message=(
+                        f"⏳ CRM: этап {config.record_type} завершён. "
+                        f"Всего записей {result.records_processed}, чанков {result.chunks_processed}."
+                    ),
+                ),
             )
     except HollihopError as exc:
         logger.warning("CRM sync stopped by Hollihop error: %s", exc)

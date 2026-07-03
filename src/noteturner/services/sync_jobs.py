@@ -8,7 +8,7 @@ from aiogram import Bot
 from noteturner.db.models import SyncRun
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
-from noteturner.services.crm_sync import CrmSyncResult, run_hollihop_sync
+from noteturner.services.crm_sync import CrmSyncProgress, CrmSyncResult, run_hollihop_sync
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,10 @@ class RunningSyncJob:
     label: str
     started_at: datetime
     chat_id: int
-    task: asyncio.Task[None]
+    task: asyncio.Task[None] | None = None
+    last_progress: CrmSyncProgress | None = None
+    status_message_id: int | None = None
+    last_status_text: str | None = None
 
 
 _jobs: dict[str, RunningSyncJob] = {}
@@ -43,11 +46,54 @@ def _format_duration(total_seconds: int) -> str:
 
 def format_running_sync_message(job: RunningSyncJob) -> str:
     elapsed = int((datetime.now(timezone.utc) - job.started_at).total_seconds())
-    return (
+    lines = [
         f"⏳ Выгрузка {job.label} из Hollihop всё ещё идёт "
-        f"({_format_duration(elapsed)}). "
-        "Напишу в этот чат, как только закончу."
-    )
+        f"({_format_duration(elapsed)})."
+    ]
+    if job.last_progress and job.last_progress.message:
+        lines.append(job.last_progress.message)
+    lines.append("Обновляю этот статус раз в минуту, пока идёт загрузка.")
+    return "\n".join(lines)
+
+
+async def _upsert_status_message(
+    bot: Bot,
+    job: RunningSyncJob,
+    text: str,
+    *,
+    allow_send: bool = True,
+) -> None:
+    if text == job.last_status_text:
+        return
+
+    if job.status_message_id is None:
+        if not allow_send:
+            return
+        message = await bot.send_message(job.chat_id, text)
+        job.status_message_id = message.message_id
+        job.last_status_text = text
+        return
+
+    try:
+        await bot.edit_message_text(text, chat_id=job.chat_id, message_id=job.status_message_id)
+        job.last_status_text = text
+    except Exception:
+        logger.exception("Failed to edit sync status message")
+        if allow_send:
+            message = await bot.send_message(job.chat_id, text)
+            job.status_message_id = message.message_id
+            job.last_status_text = text
+
+
+async def _post_periodic_status_updates(
+    bot: Bot,
+    job: RunningSyncJob,
+    *,
+    interval_seconds: float = 60.0,
+) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await _upsert_status_message(bot, job, format_running_sync_message(job), allow_send=False)
 
 
 def format_finished_sync_message(label: str, result: CrmSyncResult) -> str:
@@ -85,25 +131,49 @@ def format_last_sync_message(run: SyncRun | None) -> str:
 
 
 async def _run_hollihop_sync_job(
+    job: RunningSyncJob,
     bot: Bot,
-    chat_id: int,
     hollihop: HollihopClient,
     openrouter: OpenRouterClient | None,
     *,
     label: str,
     record_types: tuple[str, ...] | None,
 ) -> None:
+    ticker_task: asyncio.Task[None] | None = None
+
+    async def report_progress(update: CrmSyncProgress) -> None:
+        job.last_progress = update
+
     try:
-        result = await run_hollihop_sync(hollihop, openrouter, record_types=record_types)
-        await bot.send_message(chat_id, format_finished_sync_message(label, result))
+        await _upsert_status_message(bot, job, format_running_sync_message(job))
+        ticker_task = asyncio.create_task(_post_periodic_status_updates(bot, job))
+        result = await run_hollihop_sync(
+            hollihop,
+            openrouter,
+            record_types=record_types,
+            progress=report_progress,
+        )
+        await _upsert_status_message(
+            bot,
+            job,
+            format_finished_sync_message(label, result),
+        )
     except Exception:
         logger.exception("Background Hollihop sync crashed")
-        await bot.send_message(
-            chat_id,
+        await _upsert_status_message(
+            bot,
+            job,
             f"❌ Выгрузка {label} из Hollihop упала с необработанной ошибкой. "
             "Проверь логи приложения.",
         )
     finally:
+        if ticker_task is not None:
+            ticker_task.cancel()
+            try:
+                await ticker_task
+            except asyncio.CancelledError:
+                pass
+
         current_task = asyncio.current_task()
         async with _jobs_lock:
             existing = _jobs.get(HOLLIHOP_SOURCE)
@@ -136,22 +206,22 @@ async def ensure_hollihop_sync_job(
             return False, existing
 
         started_at = datetime.now(timezone.utc)
+        job = RunningSyncJob(
+            source=HOLLIHOP_SOURCE,
+            label=label,
+            started_at=started_at,
+            chat_id=chat_id,
+        )
         task = asyncio.create_task(
             _run_hollihop_sync_job(
+                job,
                 bot,
-                chat_id,
                 hollihop,
                 openrouter,
                 label=label,
                 record_types=record_types,
             )
         )
-        job = RunningSyncJob(
-            source=HOLLIHOP_SOURCE,
-            label=label,
-            started_at=started_at,
-            chat_id=chat_id,
-            task=task,
-        )
+        job.task = task
         _jobs[HOLLIHOP_SOURCE] = job
         return True, job

@@ -13,7 +13,7 @@ Telegram-бот — корпоративный ассистент «Виртуо
 - Мультиадмины: главный из env + список в БД; финансовые данные помечаются и доступны только админам
 - Маршрутизация моделей OpenRouter (simple/complex/fallback) и системные промпты в `config/*.yaml`
 - Хранение в PostgreSQL (SQLAlchemy + Alembic)
-- Команды: `/start`, `/ping`, `/status`, `/admin`, `/admins`, `/addadmin`, `/deladmin` (admin)
+- Команды: `/start`, `/ping`, `/status`, `/sources`, `/admin`, `/admins`, `/addadmin`, `/deladmin` (admin)
 
 ## Быстрый старт (локально)
 
@@ -97,6 +97,7 @@ uvicorn noteturner.main:app --reload --app-dir src
 Команда `/admin` (только для администраторов) открывает меню:
 
 - **Добавить чат** — ввод `chat_id` и выбор роли;
+- **Проверить источники** — живой запрос к Hollihop и Google Drive, чтобы увидеть доступность и число видимых файлов;
 - **Загрузить CRM** — инкрементальная выгрузка Hollihop в `raw_records` и `doc_chunks`
   (лиды, ученики, платежи, заявки, группы, связи ученик-группа, балансы);
 - **Загрузить Google Drive** — чтение файлов из папки, векторизация в `doc_chunks`;
@@ -111,6 +112,7 @@ uvicorn noteturner.main:app --reload --app-dir src
 | Команда | Действие |
 |---|---|
 | `/admins` | Список администраторов |
+| `/sources` | Живая проверка Hollihop и Google Drive |
 | `/addadmin <telegram_id>` | Добавить админа |
 | `/deladmin <telegram_id>` | Удалить админа (кроме главного) |
 

@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from datetime import datetime
 
 from aiogram import F, Router
@@ -22,13 +24,14 @@ from noteturner.db.repositories.query_logs import count_query_logs
 from noteturner.db.repositories.sync import count_raw_records, recent_sync_runs
 from noteturner.db.repositories.vectors import count_doc_chunks_by_source
 from noteturner.db.session import check_database, session_scope
-from noteturner.integrations.gdrive import GoogleDriveClient
+from noteturner.integrations.gdrive import DriveListResult, GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
 from noteturner.services.drive_sync import run_drive_sync
 from noteturner.services.sync_jobs import ensure_hollihop_sync_job, format_running_sync_message
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class AddChatStates(StatesGroup):
@@ -89,6 +92,73 @@ def _format_sync_health(name: str, database_result: dict, source: str) -> str:
         return f"• {name}: последняя успешная синхронизация {last_success_at}"
     finished_part = last_finished_at or last_started_at or "неизвестно"
     return f"• {name}: последняя синхронизация завершилась со статусом {last_status} ({finished_part})"
+
+
+def _format_drive_discovery(discovery: DriveListResult) -> list[str]:
+    roots = [root.name for root in discovery.roots if root.name]
+    if roots:
+        roots_label = ", ".join(roots[:2])
+        if len(roots) > 2:
+            roots_label += f" +{len(roots) - 2}"
+    else:
+        roots_label = "корни не определены"
+
+    files_count = len(discovery.files)
+    per_type: dict[str, int] = {}
+    for file in discovery.files:
+        per_type[file.record_type] = per_type.get(file.record_type, 0) + 1
+
+    lines = [f"✅ Google Drive ({roots_label}; {files_count} файлов)"]
+    if per_type:
+        type_summary = ", ".join(
+            f"{record_type}: {count}" for record_type, count in sorted(per_type.items())
+        )
+        lines.append(f"• Поддерживаемые типы: {type_summary}")
+    if files_count == 0 and discovery.hint_when_empty:
+        lines.append(f"⚠️ {discovery.hint_when_empty}")
+    return lines
+
+
+async def _render_sources_status(
+    hollihop: HollihopClient,
+    gdrive: GoogleDriveClient,
+) -> str:
+    hollihop_task = (
+        hollihop.health_check()
+        if hollihop.is_configured
+        else {"status": "skipped", "error": "HOLLIHOP_SUBDOMAIN / HOLLIHOP_AUTH_KEY not set"}
+    )
+
+    drive_task = (
+        gdrive.list_files_detailed()
+        if gdrive.is_configured
+        else {"status": "skipped", "error": "GDRIVE_FOLDER_ID or Google service account env vars not set"}
+    )
+
+    hh_result, gd_result = await asyncio.gather(
+        hollihop_task if asyncio.iscoroutine(hollihop_task) else asyncio.sleep(0, result=hollihop_task),
+        drive_task if asyncio.iscoroutine(drive_task) else asyncio.sleep(0, result=drive_task),
+        return_exceptions=True,
+    )
+
+    lines = [
+        "<b>Проверка источников</b>",
+        "",
+        "Живой запрос к внешним источникам данных:",
+        _format_check("Hollihop CRM", hh_result)
+        if not isinstance(hh_result, Exception)
+        else f"❌ Hollihop CRM: {hh_result}",
+    ]
+
+    if isinstance(gd_result, Exception):
+        logger.exception("Google Drive live check failed")
+        lines.append(f"❌ Google Drive: {gd_result}")
+    elif isinstance(gd_result, dict):
+        lines.append(_format_check("Google Drive", gd_result))
+    else:
+        lines.extend(_format_drive_discovery(gd_result))
+
+    return "\n".join(lines)
 
 
 def _parse_telegram_id(raw: str | None) -> int | None:
@@ -200,6 +270,21 @@ async def cmd_status(
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("sources"))
+async def cmd_sources(
+    message: Message,
+    settings: Settings,
+    hollihop: HollihopClient,
+    gdrive: GoogleDriveClient,
+) -> None:
+    user_id = message.from_user.id if message.from_user else None
+    if not await is_admin(user_id, settings):
+        await message.answer("Команда /sources доступна только администратору.")
+        return
+
+    await message.answer(await _render_sources_status(hollihop, gdrive))
+
+
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, settings: Settings) -> None:
     user_id = message.from_user.id if message.from_user else None
@@ -266,6 +351,20 @@ async def cb_add_chat(query: CallbackQuery, settings: Settings, state: FSMContex
         "Отправьте <b>chat_id</b> чата (число, например <code>-1001234567890</code>)."
     )
     await query.answer()
+
+
+@router.callback_query(F.data == "admin:check_sources")
+async def cb_check_sources(
+    query: CallbackQuery,
+    settings: Settings,
+    hollihop: HollihopClient,
+    gdrive: GoogleDriveClient,
+) -> None:
+    if not await is_admin(query.from_user.id, settings):
+        await query.answer("Только для администратора.", show_alert=True)
+        return
+    await query.answer("Проверяю источники…")
+    await query.message.answer(await _render_sources_status(hollihop, gdrive))
 
 
 @router.message(StateFilter(AddChatStates.waiting_for_chat_id), F.text)
@@ -401,10 +500,6 @@ async def cb_sync_crm(
     if not started:
         await query.message.answer(format_running_sync_message(job))
         return
-    await query.message.answer(
-        "⏳ Загружаю и векторизую данные из Hollihop в фоне. "
-        "Сюда же пришлю итог, когда выгрузка завершится."
-    )
 
 
 @router.callback_query(F.data == "admin:sync_drive")

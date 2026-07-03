@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import noteturner.services.crm_sync as cs
@@ -86,3 +87,116 @@ def test_scope_types_include_new_entities() -> None:
     assert ("edunit_student", "GetEdUnitStudents", "EdUnitStudents", True) in ENDPOINTS
     assert ("study_request", "GetStudyRequests", "StudyRequests", False) in ENDPOINTS
     assert ("balance", "GetBalances", "Balances", True) in ENDPOINTS
+
+
+async def test_sync_entity_reports_page_progress(monkeypatch) -> None:
+    class _FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def fake_scope():
+        yield _FakeSession()
+
+    monkeypatch.setattr(cs, "session_scope", fake_scope)
+    monkeypatch.setattr(cs, "get_sync_cursor", AsyncMock(return_value=None))
+    monkeypatch.setattr(cs, "upsert_raw_record", AsyncMock())
+
+    hollihop = AsyncMock()
+    hollihop.call = AsyncMock(
+        side_effect=[
+            {
+                "Leads": [
+                    {"Id": 1, "Updated": "2026-01-01T00:00:00"},
+                    {"Id": 2, "Updated": "2026-01-01T00:01:00"},
+                ],
+                "Now": "2026-01-01T00:02:00",
+            },
+            {"Leads": [], "Now": "2026-01-01T00:02:00"},
+        ]
+    )
+
+    progress_updates = []
+
+    async def progress(update) -> None:
+        progress_updates.append(update)
+
+    _records, _next_cursor, _next_meta, processed = await cs._sync_entity(
+        hollihop,
+        config=cs.ENTITY_CONFIGS["lead"],
+        progress=progress,
+    )
+
+    assert processed == 2
+    page_update = next(update for update in progress_updates if update.stage == "page_fetched")
+    assert page_update.record_type == "lead"
+    assert page_update.records_processed == 2
+    assert page_update.page_index == 1
+    assert "загружено 2 записей типа lead" in (page_update.message or "")
+
+
+async def test_run_hollihop_sync_reports_progress(monkeypatch) -> None:
+    class _FakeSession:
+        async def get(self, *_args, **_kwargs):
+            return object()
+
+    @asynccontextmanager
+    async def fake_scope():
+        yield _FakeSession()
+
+    monkeypatch.setattr(cs, "session_scope", fake_scope)
+    monkeypatch.setattr(cs, "create_sync_run", AsyncMock(return_value=SimpleNamespace(id=7)))
+    monkeypatch.setattr(cs, "finish_sync_run", AsyncMock())
+    monkeypatch.setattr(cs, "upsert_sync_cursor", AsyncMock())
+    monkeypatch.setattr(
+        cs,
+        "_sync_entity",
+        AsyncMock(
+            return_value=(
+                [
+                    SyncedRecord(
+                        external_id="1",
+                        record_type="lead",
+                        title="CRM lead #1",
+                        content="lead 1",
+                        payload=None,
+                        is_financial=False,
+                        vector_chunks=[VectorChunkSpec(content="lead 1"), VectorChunkSpec(content="lead 1 details")],
+                    )
+                ],
+                "2026-01-01T00:00:00",
+                {"last_synced_at": "2026-01-01T00:00:00"},
+                1,
+            )
+        ),
+    )
+    monkeypatch.setattr(cs, "_vectorize_records", AsyncMock(return_value=2))
+
+    hollihop = AsyncMock()
+    hollihop.is_configured = True
+
+    openrouter = AsyncMock()
+    openrouter.is_configured = True
+
+    progress_updates = []
+
+    async def progress(update) -> None:
+        progress_updates.append(update)
+
+    result = await cs.run_hollihop_sync(
+        hollihop,
+        openrouter,
+        record_types=("lead",),
+        progress=progress,
+    )
+
+    assert result.status == "ok"
+    assert result.records_processed == 1
+    assert result.chunks_processed == 2
+    assert [update.stage for update in progress_updates] == [
+        "entity_started",
+        "entity_fetched",
+        "vectorizing",
+        "vectorized",
+        "entity_finished",
+    ]

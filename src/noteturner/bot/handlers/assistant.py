@@ -169,10 +169,6 @@ async def handle_assistant_message(
         if not started:
             await message.answer(format_running_sync_message(job))
             return
-        await message.answer(
-            f"⏳ Запустил выгрузку {label} из Hollihop в фоне. "
-            "Сюда же пришлю итог, когда синхронизация завершится."
-        )
         return
 
     if not openrouter.is_configured:

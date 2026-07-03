@@ -5,6 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def admin_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Добавить чат", callback_data="admin:add_chat")
+    builder.button(text="Проверить источники", callback_data="admin:check_sources")
     builder.button(text="Загрузить CRM", callback_data="admin:sync_crm")
     builder.button(text="Загрузить Google Drive", callback_data="admin:sync_drive")
     builder.button(text="Статистика", callback_data="admin:stats")
