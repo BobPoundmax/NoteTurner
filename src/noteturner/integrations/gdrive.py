@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from noteturner.config.settings import Settings
-from noteturner.debug_session import agent_log
 
 logger = logging.getLogger(__name__)
 
@@ -68,36 +67,12 @@ class GoogleDriveClient:
 
     @property
     def is_configured(self) -> bool:
-        configured = self._settings.gdrive_is_configured
-        # region agent log
-        agent_log(
-            location="gdrive.py:is_configured",
-            message="gdrive configured check",
-            data={
-                "configured": configured,
-                "has_folder_id": bool(self._settings.gdrive_folder_id.strip()),
-                "has_project_id": bool(self._settings.google_project_id.strip()),
-                "has_email": bool(self._settings.google_service_account_email.strip()),
-                "has_private_key": bool(self._settings.google_private_key.strip()),
-            },
-            hypothesis_id="H4",
-        )
-        # endregion
-        return configured
+        return self._settings.gdrive_is_configured
 
     def _build_services(self) -> tuple[Any, Any]:
         with self._lock:
             if self._drive is not None and self._sheets is not None:
                 return self._drive, self._sheets
-
-            # region agent log
-            agent_log(
-                location="gdrive.py:_build_services",
-                message="building google drive services",
-                data={},
-                hypothesis_id="H1",
-            )
-            # endregion
 
             # Imported lazily so the module can be imported without the Google
             # client libraries installed (e.g. in unit tests that only touch helpers).
@@ -112,15 +87,6 @@ class GoogleDriveClient:
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             self._drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
             self._sheets = build("sheets", "v4", credentials=credentials, cache_discovery=False)
-
-            # region agent log
-            agent_log(
-                location="gdrive.py:_build_services",
-                message="google drive services built",
-                data={},
-                hypothesis_id="H1",
-            )
-            # endregion
             return self._drive, self._sheets
 
     async def list_files(self) -> list[DriveFile]:
@@ -136,14 +102,6 @@ class GoogleDriveClient:
             return self._list_files_sync_locked(folder_id)
 
     def _list_files_sync_locked(self, folder_id: str) -> list[DriveFile]:
-        # region agent log
-        agent_log(
-            location="gdrive.py:_list_files_sync",
-            message="list_files start",
-            data={"folder_id_len": len(folder_id)},
-            hypothesis_id="H1",
-        )
-        # endregion
         drive, _ = self._build_services()
         collected: list[DriveFile] = []
         stack = [folder_id]
@@ -181,27 +139,11 @@ class GoogleDriveClient:
                 if not page_token:
                     break
 
-        # region agent log
-        agent_log(
-            location="gdrive.py:_list_files_sync",
-            message="list_files done",
-            data={"files_count": len(collected), "visited_folders": len(visited)},
-            hypothesis_id="H1",
-        )
-        # endregion
         return collected
 
     def _probe_folder_sync(self, folder_id: str) -> str:
         """Lightweight health probe: verify folder is reachable (no full listing)."""
         with self._lock:
-            # region agent log
-            agent_log(
-                location="gdrive.py:_probe_folder_sync",
-                message="probe start",
-                data={"folder_id_len": len(folder_id)},
-                hypothesis_id="H2",
-            )
-            # endregion
             drive, _ = self._build_services()
             meta = (
                 drive.files()
@@ -212,16 +154,7 @@ class GoogleDriveClient:
                 )
                 .execute()
             )
-            name = str(meta.get("name") or folder_id)
-            # region agent log
-            agent_log(
-                location="gdrive.py:_probe_folder_sync",
-                message="probe done",
-                data={"folder_name": name, "mime_type": meta.get("mimeType")},
-                hypothesis_id="H2",
-            )
-            # endregion
-            return name
+            return str(meta.get("name") or folder_id)
 
     async def extract_text(self, file: DriveFile) -> str:
         return await asyncio.to_thread(self._extract_text_sync, file)
@@ -271,25 +204,9 @@ class GoogleDriveClient:
                 "error": "GDRIVE_FOLDER_ID or Google service account env vars not set",
             }
         try:
-            # region agent log
-            agent_log(
-                location="gdrive.py:health_check",
-                message="health_check start",
-                data={},
-                hypothesis_id="H1",
-            )
-            # endregion
             folder_name = await asyncio.to_thread(
                 self._probe_folder_sync, self._settings.gdrive_folder_id
             )
-            # region agent log
-            agent_log(
-                location="gdrive.py:health_check",
-                message="health_check ok",
-                data={"folder_name": folder_name},
-                hypothesis_id="H1",
-            )
-            # endregion
             return {
                 "status": "ok",
                 "folder_name": folder_name,
