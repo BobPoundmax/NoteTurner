@@ -11,7 +11,20 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я <b>Note Turner</b> — корпоративный ассистент «Виртуозы».\n\n"
         "• В личке — просто напишите вопрос.\n"
         "• В группе — упомяните меня через @.\n\n"
-        "Команды: /ping, /status (admin), /admin (admin), /admins (admin)"
+        "Команды: /ping, /myid, /status (admin), /admin (admin), /admins (admin)"
+    )
+
+
+@router.message(Command("myid"))
+async def cmd_myid(message: Message) -> None:
+    user = message.from_user
+    if user is None:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    username = f"@{user.username}" if user.username else "не задан"
+    await message.answer(
+        f"Ваш Telegram ID: <code>{user.id}</code>\n"
+        f"Username: {username}"
     )
 
 

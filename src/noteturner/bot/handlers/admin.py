@@ -6,6 +6,12 @@ from aiogram.types import CallbackQuery, Message
 
 from noteturner.bot.access import is_admin, is_main_admin
 from noteturner.bot.keyboards.admin import admin_menu, admins_menu, role_choice
+from noteturner.bot.user_resolve import (
+    format_user_label,
+    parse_telegram_id,
+    resolve_admin_target,
+    resolve_telegram_user,
+)
 from noteturner.config.settings import Settings
 from noteturner.db.repositories import admins as admins_repo
 from noteturner.db.repositories.chats import count_chats_by_role, upsert_chat
@@ -52,12 +58,39 @@ def _format_check(name: str, result: dict) -> str:
 
 
 def _parse_telegram_id(raw: str | None) -> int | None:
-    if not raw:
-        return None
-    try:
-        return int(raw.strip())
-    except ValueError:
-        return None
+    return parse_telegram_id(raw)
+
+
+async def _do_add_admin(
+    telegram_id: int,
+    added_by: int | None,
+    *,
+    username: str | None = None,
+) -> str:
+    async with session_scope() as session:
+        created = await admins_repo.add_admin(
+            session, telegram_id=telegram_id, added_by=added_by
+        )
+    label = format_user_label(telegram_id=telegram_id, username=username)
+    if created:
+        return f"✅ Админ {label} добавлен."
+    return f"ℹ️ {label} уже админ."
+
+
+async def _do_remove_admin(
+    telegram_id: int,
+    settings: Settings,
+    *,
+    username: str | None = None,
+) -> str:
+    if is_main_admin(telegram_id, settings):
+        return "⛔ Главного админа (из env) удалить нельзя."
+    async with session_scope() as session:
+        removed = await admins_repo.remove_admin(session, telegram_id=telegram_id)
+    label = format_user_label(telegram_id=telegram_id, username=username)
+    if removed:
+        return f"✅ Админ {label} удалён."
+    return f"ℹ️ {label} не был админом."
 
 
 async def _render_admins(settings: Settings) -> str:
@@ -76,27 +109,11 @@ async def _render_admins(settings: Settings) -> str:
             lines.append(f"• {admin.telegram_id}{added}")
     else:
         lines.append("• дополнительных админов нет")
+    lines.append("")
+    lines.append(
+        "Добавить: <code>/addadmin @username</code> или <code>/addadmin telegram_id</code>"
+    )
     return "\n".join(lines)
-
-
-async def _do_add_admin(telegram_id: int, added_by: int | None) -> str:
-    async with session_scope() as session:
-        created = await admins_repo.add_admin(
-            session, telegram_id=telegram_id, added_by=added_by
-        )
-    if created:
-        return f"✅ Админ <code>{telegram_id}</code> добавлен."
-    return f"ℹ️ <code>{telegram_id}</code> уже админ."
-
-
-async def _do_remove_admin(telegram_id: int, settings: Settings) -> str:
-    if is_main_admin(telegram_id, settings):
-        return "⛔ Главного админа (из env) удалить нельзя."
-    async with session_scope() as session:
-        removed = await admins_repo.remove_admin(session, telegram_id=telegram_id)
-    if removed:
-        return f"✅ Админ <code>{telegram_id}</code> удалён."
-    return f"ℹ️ <code>{telegram_id}</code> не был админом."
 
 
 @router.message(Command("status"))
@@ -160,11 +177,17 @@ async def cmd_add_admin(message: Message, settings: Settings, command: CommandOb
     if not await is_admin(user_id, settings):
         await message.answer("Команда доступна только администратору.")
         return
-    telegram_id = _parse_telegram_id(command.args)
-    if telegram_id is None:
-        await message.answer("Использование: <code>/addadmin &lt;telegram_id&gt;</code>")
+    if not command.args:
+        await message.answer(
+            "Использование: <code>/addadmin @username</code> или "
+            "<code>/addadmin telegram_id</code>"
+        )
         return
-    await message.answer(await _do_add_admin(telegram_id, user_id))
+    telegram_id, username, error = await resolve_telegram_user(message.bot, command.args)
+    if error:
+        await message.answer(error)
+        return
+    await message.answer(await _do_add_admin(telegram_id, user_id, username=username))
 
 
 @router.message(Command("deladmin"))
@@ -173,11 +196,17 @@ async def cmd_del_admin(message: Message, settings: Settings, command: CommandOb
     if not await is_admin(user_id, settings):
         await message.answer("Команда доступна только администратору.")
         return
-    telegram_id = _parse_telegram_id(command.args)
-    if telegram_id is None:
-        await message.answer("Использование: <code>/deladmin &lt;telegram_id&gt;</code>")
+    if not command.args:
+        await message.answer(
+            "Использование: <code>/deladmin @username</code> или "
+            "<code>/deladmin telegram_id</code>"
+        )
         return
-    await message.answer(await _do_remove_admin(telegram_id, settings))
+    telegram_id, username, error = await resolve_telegram_user(message.bot, command.args)
+    if error:
+        await message.answer(error)
+        return
+    await message.answer(await _do_remove_admin(telegram_id, settings, username=username))
 
 
 @router.callback_query(F.data == "admin:add_chat")
@@ -244,21 +273,24 @@ async def cb_admin_add(query: CallbackQuery, settings: Settings, state: FSMConte
         await query.answer("Только для администратора.", show_alert=True)
         return
     await state.set_state(AdminMgmtStates.waiting_for_add_id)
-    await query.message.answer("Отправьте <b>telegram_id</b> нового админа.")
+    await query.message.answer(
+        "Отправьте <b>telegram_id</b>, <b>@username</b> "
+        "или перешлите сообщение нового админа."
+    )
     await query.answer()
 
 
-@router.message(StateFilter(AdminMgmtStates.waiting_for_add_id), F.text)
+@router.message(StateFilter(AdminMgmtStates.waiting_for_add_id))
 async def admin_add_id(message: Message, settings: Settings, state: FSMContext) -> None:
     if not await is_admin(message.from_user.id if message.from_user else None, settings):
         return
-    telegram_id = _parse_telegram_id(message.text)
     await state.clear()
-    if telegram_id is None:
-        await message.answer("Некорректный telegram_id. Отправьте целое число.")
+    telegram_id, username, error = await resolve_admin_target(message)
+    if error:
+        await message.answer(error)
         return
     added_by = message.from_user.id if message.from_user else None
-    await message.answer(await _do_add_admin(telegram_id, added_by))
+    await message.answer(await _do_add_admin(telegram_id, added_by, username=username))
 
 
 @router.callback_query(F.data == "admin:admin_del")
@@ -267,7 +299,9 @@ async def cb_admin_del(query: CallbackQuery, settings: Settings, state: FSMConte
         await query.answer("Только для администратора.", show_alert=True)
         return
     await state.set_state(AdminMgmtStates.waiting_for_del_id)
-    await query.message.answer("Отправьте <b>telegram_id</b> админа для удаления.")
+    await query.message.answer(
+        "Отправьте <b>telegram_id</b> или <b>@username</b> админа для удаления."
+    )
     await query.answer()
 
 
@@ -275,12 +309,12 @@ async def cb_admin_del(query: CallbackQuery, settings: Settings, state: FSMConte
 async def admin_del_id(message: Message, settings: Settings, state: FSMContext) -> None:
     if not await is_admin(message.from_user.id if message.from_user else None, settings):
         return
-    telegram_id = _parse_telegram_id(message.text)
     await state.clear()
-    if telegram_id is None:
-        await message.answer("Некорректный telegram_id. Отправьте целое число.")
+    telegram_id, username, error = await resolve_telegram_user(message.bot, message.text or "")
+    if error:
+        await message.answer(error)
         return
-    await message.answer(await _do_remove_admin(telegram_id, settings))
+    await message.answer(await _do_remove_admin(telegram_id, settings, username=username))
 
 
 @router.callback_query(F.data == "admin:admin_list")
