@@ -686,6 +686,14 @@ async def _sync_entity(
 
     request_params, request_meta = _build_request_params(config, cursor_value)
     next_cursor, next_meta = cursor_value, {"last_synced_at": _current_utc_iso(), **request_meta}
+    logger.info(
+        "CRM sync entity started record_type=%s endpoint=%s cursor_kind=%s cursor_value=%s page_size=%s",
+        config.record_type,
+        config.function_name,
+        config.cursor_kind,
+        cursor_value or "-",
+        config.page_size,
+    )
 
     async with session_scope() as session:
         while processed < MAX_RECORDS_PER_TYPE:
@@ -696,6 +704,7 @@ async def _sync_entity(
                 skip=skip,
             )
             items = data.get(config.result_key) or []
+            page_count = len(items)
             next_cursor, next_meta = _next_cursor_value(
                 config,
                 previous=next_cursor,
@@ -704,6 +713,12 @@ async def _sync_entity(
                 request_meta=request_meta,
             )
             if not items:
+                logger.info(
+                    "CRM sync page fetched record_type=%s skip=%s fetched=0 processed_total=%s",
+                    config.record_type,
+                    skip,
+                    processed,
+                )
                 break
 
             for item in items:
@@ -723,6 +738,13 @@ async def _sync_entity(
                     break
 
             await session.commit()
+            logger.info(
+                "CRM sync page fetched record_type=%s skip=%s fetched=%s processed_total=%s",
+                config.record_type,
+                skip,
+                page_count,
+                processed,
+            )
             if len(items) < config.page_size or processed >= MAX_RECORDS_PER_TYPE:
                 break
             skip += config.page_size
@@ -793,7 +815,14 @@ async def run_hollihop_sync(
         return result
 
     selected_types = record_types or SYNC_SCOPE_TYPES["all"]
+    vectorization_enabled = bool(openrouter is not None and openrouter.is_configured)
     configs = [ENTITY_CONFIGS[record_type] for record_type in selected_types if record_type in ENTITY_CONFIGS]
+    logger.info(
+        "CRM sync started source=%s record_types=%s vectorization_enabled=%s",
+        SOURCE,
+        ",".join(selected_types),
+        vectorization_enabled,
+    )
 
     async with session_scope() as session:
         sync_run = await create_sync_run(session, source=SOURCE)
@@ -803,6 +832,7 @@ async def run_hollihop_sync(
 
     try:
         for config in configs:
+            logger.info("CRM sync phase started record_type=%s", config.record_type)
             records, next_cursor, next_meta, processed = await _sync_entity(
                 hollihop,
                 config=config,
@@ -811,10 +841,31 @@ async def run_hollihop_sync(
             result.records_processed += processed
             if config.is_financial:
                 result.financial_processed += processed
+            logger.info(
+                "CRM sync phase fetched record_type=%s records=%s financial=%s next_cursor=%s",
+                config.record_type,
+                processed,
+                config.is_financial,
+                next_cursor or "-",
+            )
 
-            if openrouter is not None and openrouter.is_configured:
+            if vectorization_enabled:
                 try:
-                    result.chunks_processed += await _vectorize_records(openrouter, records)
+                    chunk_candidates = sum(len(record.vector_chunks) for record in records)
+                    logger.info(
+                        "CRM vectorization started record_type=%s records=%s chunk_candidates=%s",
+                        config.record_type,
+                        len(records),
+                        chunk_candidates,
+                    )
+                    chunks_added = await _vectorize_records(openrouter, records)
+                    result.chunks_processed += chunks_added
+                    logger.info(
+                        "CRM vectorization finished record_type=%s chunks_added=%s chunks_total=%s",
+                        config.record_type,
+                        chunks_added,
+                        result.chunks_processed,
+                    )
                 except OpenRouterError as exc:
                     logger.warning("CRM vectorization failed for %s: %s", config.record_type, exc)
                     errors.append(f"{config.record_type}: vectorization failed ({exc})")
@@ -830,7 +881,14 @@ async def run_hollihop_sync(
                     meta=next_meta,
                     last_records_processed=processed,
                 )
+            logger.info(
+                "CRM sync phase finished record_type=%s records=%s chunks_total=%s",
+                config.record_type,
+                processed,
+                result.chunks_processed,
+            )
     except HollihopError as exc:
+        logger.warning("CRM sync stopped by Hollihop error: %s", exc)
         result.status = "error"
         result.error = str(exc)
     except Exception as exc:  # noqa: BLE001 - surface any failure to the admin
@@ -855,4 +913,12 @@ async def run_hollihop_sync(
                 error_log=result.error,
             )
 
+    logger.info(
+        "CRM sync finished status=%s records=%s financial=%s chunks=%s warnings=%s",
+        result.status,
+        result.records_processed,
+        result.financial_processed,
+        result.chunks_processed,
+        len(errors),
+    )
     return result

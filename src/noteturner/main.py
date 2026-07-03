@@ -41,6 +41,8 @@ async def lifespan(app: FastAPI):
     global _polling_task
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     init_db(settings)
 
     if bot is not None:
@@ -72,7 +74,25 @@ app = FastAPI(title="Note Turner", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict:
     result = await run_health_checks(
-        bot=bot, openrouter=openrouter, hollihop=hollihop, gdrive=gdrive
+        bot=bot,
+        openrouter=openrouter,
+        hollihop=hollihop,
+        gdrive=gdrive,
+        deep=False,
+    )
+    if not result.get("critical_ok", True):
+        raise HTTPException(status_code=503, detail=result)
+    return result
+
+
+@app.get("/health/deep")
+async def health_deep() -> dict:
+    result = await run_health_checks(
+        bot=bot,
+        openrouter=openrouter,
+        hollihop=hollihop,
+        gdrive=gdrive,
+        deep=True,
     )
     if not result.get("critical_ok", True):
         raise HTTPException(status_code=503, detail=result)
