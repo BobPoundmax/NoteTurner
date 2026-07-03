@@ -7,13 +7,20 @@ from noteturner.bot.access import is_admin
 from noteturner.bot.filters import ChatRoleFilter
 from noteturner.bot.utils import is_bot_mentioned, is_group_chat, strip_bot_mention
 from noteturner.config.settings import Settings
+from noteturner.db.repositories.sync import recent_sync_runs
 from noteturner.db.repositories.query_logs import add_query_log
 from noteturner.db.session import session_scope
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient, OpenRouterError
-from noteturner.services.crm_sync import get_scope_record_types, run_hollihop_sync
+from noteturner.services.crm_sync import get_scope_record_types
 from noteturner.services.llm.answerer import Answerer
 from noteturner.services.llm.retriever import VectorRetriever
+from noteturner.services.sync_jobs import (
+    ensure_hollihop_sync_job,
+    format_last_sync_message,
+    format_running_sync_message,
+    get_running_hollihop_sync_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +60,15 @@ def is_sync_intent(text: str) -> bool:
     return any(phrase in lowered for phrase in SYNC_INTENT_PHRASES)
 
 
+def is_sync_status_intent(text: str) -> bool:
+    lowered = text.lower()
+    status_markers = ("статус", "закончил", "закончила", "закончилась", "закончено", "как там", "идет", "идёт")
+    sync_markers = ("crm", "hollihop", "холихоп", "выгруз", "синхрон", "обновлен", "обновление")
+    return any(marker in lowered for marker in status_markers) and any(
+        marker in lowered for marker in sync_markers
+    )
+
+
 def detect_crm_refresh_scope(text: str) -> tuple[str, tuple[str, ...], str] | None:
     lowered = text.lower()
     if "google drive" in lowered or "диск" in lowered:
@@ -83,6 +99,27 @@ async def _log_query(telegram_chat_id: int, question: str, model: str | None) ->
         logger.exception("Failed to log query for chat %s", telegram_chat_id)
 
 
+async def _reply_with_crm_sync_status(message: Message) -> None:
+    running_job = get_running_hollihop_sync_job()
+    if running_job is not None:
+        await message.answer(format_running_sync_message(running_job))
+        return
+
+    try:
+        async with session_scope() as session:
+            runs = await recent_sync_runs(session, limit=10)
+    except RuntimeError:
+        await message.answer("Не могу проверить статус CRM-выгрузки: база данных не настроена.")
+        return
+    except Exception:
+        logger.exception("Failed to fetch CRM sync status")
+        await message.answer("Не получилось проверить статус CRM-выгрузки. Проверь логи приложения.")
+        return
+
+    latest_crm_run = next((run for run in runs if run.source == "hollihop"), None)
+    await message.answer(format_last_sync_message(latest_crm_run))
+
+
 @router.message(F.text, ~F.text.startswith("/"), ChatRoleFilter("assistant"))
 async def handle_assistant_message(
     message: Message,
@@ -99,16 +136,14 @@ async def handle_assistant_message(
         await message.answer("Напишите ваш вопрос после упоминания @бота.")
         return
 
-    await message.bot.send_chat_action(message.chat.id, "typing")
-
-    if not openrouter.is_configured:
-        await message.answer(
-            "OpenRouter не настроен. Администратор должен задать <code>OPENROUTER_API_KEY</code>."
-        )
-        return
-
     user_id = message.from_user.id if message.from_user else None
     admin = await is_admin(user_id, settings)
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    if admin and is_sync_status_intent(user_text):
+        await _reply_with_crm_sync_status(message)
+        return
 
     if admin and is_sync_intent(user_text):
         scope = detect_crm_refresh_scope(user_text)
@@ -123,18 +158,27 @@ async def handle_assistant_message(
             return
 
         _, record_types, label = scope
-        await message.answer(f"⏳ Обновляю {label} из Hollihop…")
-        result = await run_hollihop_sync(hollihop, openrouter, record_types=record_types)
-        if result.status == "ok":
-            by_type = ", ".join(f"{key}: {value}" for key, value in result.per_type.items()) or "нет записей"
-            note = f"\n⚠️ {result.error}" if result.error else ""
-            await message.answer(
-                f"✅ CRM refresh завершён. Обработано {result.records_processed} "
-                f"(из них финансовых {result.financial_processed}), "
-                f"векторизовано {result.chunks_processed}. {by_type}.{note}"
-            )
-        else:
-            await message.answer(f"❌ Ошибка CRM refresh: {result.error}")
+        started, job = await ensure_hollihop_sync_job(
+            message.bot,
+            message.chat.id,
+            hollihop,
+            openrouter,
+            label=label,
+            record_types=record_types,
+        )
+        if not started:
+            await message.answer(format_running_sync_message(job))
+            return
+        await message.answer(
+            f"⏳ Запустил выгрузку {label} из Hollihop в фоне. "
+            "Сюда же пришлю итог, когда синхронизация завершится."
+        )
+        return
+
+    if not openrouter.is_configured:
+        await message.answer(
+            "OpenRouter не настроен. Администратор должен задать <code>OPENROUTER_API_KEY</code>."
+        )
         return
 
     # doc_chunks may hold Google Drive and/or CRM vectors, so retrieve whenever

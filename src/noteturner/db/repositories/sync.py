@@ -96,6 +96,20 @@ async def recent_sync_runs(session: AsyncSession, *, limit: int = 5) -> list[Syn
     return list(result.scalars().all())
 
 
+async def latest_sync_run(
+    session: AsyncSession,
+    *,
+    source: str,
+    status: str | None = None,
+) -> SyncRun | None:
+    stmt = select(SyncRun).where(SyncRun.source == source)
+    if status is not None:
+        stmt = stmt.where(SyncRun.status == status)
+    stmt = stmt.order_by(SyncRun.started_at.desc()).limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
 async def get_sync_cursor(
     session: AsyncSession,
     *,

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -23,8 +25,8 @@ from noteturner.db.session import check_database, session_scope
 from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
-from noteturner.services.crm_sync import run_hollihop_sync
 from noteturner.services.drive_sync import run_drive_sync
+from noteturner.services.sync_jobs import ensure_hollihop_sync_job, format_running_sync_message
 
 router = Router()
 
@@ -55,6 +57,38 @@ def _format_check(name: str, result: dict) -> str:
     if status == "skipped":
         return f"⏭ {name}: {result.get('error', 'not configured')}"
     return f"❌ {name}: {result.get('error', 'unknown error')}"
+
+
+def _format_health_timestamp(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%d.%m %H:%M")
+    except ValueError:
+        return value
+
+
+def _format_sync_health(name: str, database_result: dict, source: str) -> str:
+    sync_runs = database_result.get("sync_runs") or {}
+    sync_info = sync_runs.get(source) or {}
+    last_run = sync_info.get("last_run") or {}
+    last_success_at = _format_health_timestamp(sync_info.get("last_success_at"))
+    last_status = last_run.get("status")
+    last_finished_at = _format_health_timestamp(last_run.get("finished_at"))
+    last_started_at = _format_health_timestamp(last_run.get("started_at"))
+
+    if not last_run:
+        return f"• {name}: синхронизаций ещё не было"
+    if last_status == "running":
+        success_part = last_success_at or "ещё не было"
+        return (
+            f"• {name}: идёт синхронизация (старт {last_started_at or 'неизвестно'}), "
+            f"последняя успешная {success_part}"
+        )
+    if last_success_at:
+        return f"• {name}: последняя успешная синхронизация {last_success_at}"
+    finished_part = last_finished_at or last_started_at or "неизвестно"
+    return f"• {name}: последняя синхронизация завершилась со статусом {last_status} ({finished_part})"
 
 
 def _parse_telegram_id(raw: str | None) -> int | None:
@@ -146,10 +180,23 @@ async def cmd_status(
         _format_check("OpenRouter", or_result),
         _format_check("Hollihop CRM", hh_result),
         _format_check("Google Drive", gd_result),
-        "",
-        f"Bot: @{bot_info.username}",
-        f"Mode: {settings.bot_mode}",
     ]
+    if db_result.get("status") == "ok":
+        lines.extend(
+            [
+                "",
+                "<b>Последние обновления данных</b>",
+                _format_sync_health("CRM", db_result, "hollihop"),
+                _format_sync_health("Google Drive", db_result, "gdrive"),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            f"Bot: @{bot_info.username}",
+            f"Mode: {settings.bot_mode}",
+        ]
+    )
     await message.answer("\n".join(lines))
 
 
@@ -344,20 +391,20 @@ async def cb_sync_crm(
         await query.answer("Только для администратора.", show_alert=True)
         return
     await query.answer("Запускаю выгрузку CRM…")
-    await query.message.answer("⏳ Загружаю и векторизую данные из Hollihop…")
-
-    result = await run_hollihop_sync(hollihop, openrouter)
-
-    if result.status == "ok":
-        by_type = ", ".join(f"{k}: {v}" for k, v in result.per_type.items()) or "нет записей"
-        note = f"\n⚠️ {result.error}" if result.error else ""
-        await query.message.answer(
-            f"✅ CRM sync завершён. Обработано {result.records_processed} "
-            f"(из них финансовых {result.financial_processed}), "
-            f"векторизовано {result.chunks_processed}. {by_type}.{note}"
-        )
-    else:
-        await query.message.answer(f"❌ Ошибка CRM sync: {result.error}")
+    started, job = await ensure_hollihop_sync_job(
+        query.bot,
+        query.message.chat.id,
+        hollihop,
+        openrouter,
+        label="данных CRM",
+    )
+    if not started:
+        await query.message.answer(format_running_sync_message(job))
+        return
+    await query.message.answer(
+        "⏳ Загружаю и векторизую данные из Hollihop в фоне. "
+        "Сюда же пришлю итог, когда выгрузка завершится."
+    )
 
 
 @router.callback_query(F.data == "admin:sync_drive")

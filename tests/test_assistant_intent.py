@@ -1,4 +1,8 @@
-from noteturner.bot.handlers.assistant import detect_crm_refresh_scope, is_sync_intent
+from noteturner.bot.handlers.assistant import (
+    detect_crm_refresh_scope,
+    is_sync_intent,
+    is_sync_status_intent,
+)
 
 
 def test_sync_intent_matches_collection_requests() -> None:
@@ -10,6 +14,16 @@ def test_sync_intent_matches_collection_requests() -> None:
 def test_sync_intent_ignores_regular_questions() -> None:
     assert is_sync_intent("Какая выручка в марте?") is False
     assert is_sync_intent("Сколько у нас учеников?") is False
+
+
+def test_sync_status_intent_matches_status_questions() -> None:
+    assert is_sync_status_intent("Ты закончил выгрузку данных из холихоп?") is True
+    assert is_sync_status_intent("Как там синхронизация CRM?") is True
+
+
+def test_sync_status_intent_ignores_regular_questions() -> None:
+    assert is_sync_status_intent("Обнови CRM пожалуйста") is False
+    assert is_sync_status_intent("Сколько у нас учеников?") is False
 
 
 def test_detect_crm_refresh_scope() -> None:
