@@ -31,11 +31,12 @@ GROUP_PAYER_RECORD_TYPE = "group_payer"
 GROUP_FISCAL_RECORD_TYPE = "group_fiscal"
 
 SYNC_SCOPE_TYPES: dict[str, tuple[str, ...]] = {
-    "all": ("lead", "student", "payment", "study_request", "edunit", "edunit_student", "balance"),
+    "all": ("student", "payment", "balance", "lead", "study_request", "edunit", "edunit_student"),
     "finance": ("payment", "balance"),
     "groups": ("edunit", "edunit_student"),
+    "leads": ("lead", "study_request"),
     "marketing": ("lead", "study_request"),
-    "students": ("student", "edunit_student"),
+    "students": ("student",),
 }
 
 

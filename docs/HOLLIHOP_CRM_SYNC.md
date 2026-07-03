@@ -46,11 +46,13 @@ and snapshot-based where it does not.
 ## Freshness strategy
 
 - Default: answer from local indexed data.
-- Manual refresh: `/admin` -> `Загрузить CRM`.
+- Manual refresh: `/admin` -> one of the CRM sync buttons (`студенты`, `платежи`, `лиды`, `группы`, `всё CRM`).
 - Targeted admin refresh in private chat:
-  - `обнови CRM`
+  - `обнови студентов`
   - `обнови платежи`
+  - `обнови лиды`
   - `обнови группы`
+  - `обнови CRM` (полный прогон; порядок: студенты -> платежи/балансы -> лиды/заявки -> группы)
 - Admins can also ask plain-language count questions like
   `сколько у тебя данных в векторной базе по лидам и расписанию`, which should
   be answered from DB counts directly instead of RAG.

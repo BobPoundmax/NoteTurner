@@ -34,9 +34,17 @@ from noteturner.services.sync_jobs import (
     format_running_drive_sync_message,
     format_running_sync_message,
 )
+from noteturner.services.crm_sync import get_scope_record_types
 
 router = Router()
 logger = logging.getLogger(__name__)
+CRM_SCOPE_LABELS: dict[str, str] = {
+    "all": "данных CRM",
+    "students": "студентов",
+    "finance": "платежей и балансов",
+    "leads": "лидов и заявок",
+    "groups": "групп и расписания",
+}
 
 
 class AddChatStates(StatesGroup):
@@ -181,6 +189,31 @@ async def _render_sources_status(
         lines.extend(_format_drive_discovery(gd_result))
 
     return "\n".join(lines)
+
+
+async def _start_crm_sync(
+    query: CallbackQuery,
+    settings: Settings,
+    hollihop: HollihopClient,
+    openrouter: OpenRouterClient,
+    *,
+    scope: str,
+) -> None:
+    if not await is_admin(query.from_user.id, settings):
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
+        return
+    label = CRM_SCOPE_LABELS.get(scope, "данных CRM")
+    await _answer_callback(query, f"Запускаю выгрузку {label}…")
+    started, job = await ensure_hollihop_sync_job(
+        query.bot,
+        query.message.chat.id,
+        hollihop,
+        openrouter,
+        label=label,
+        record_types=None if scope == "all" else get_scope_record_types(scope),
+    )
+    if not started:
+        await query.message.answer(format_running_sync_message(job))
 
 
 def _parse_telegram_id(raw: str | None) -> int | None:
@@ -508,20 +541,33 @@ async def cb_sync_crm(
     hollihop: HollihopClient,
     openrouter: OpenRouterClient,
 ) -> None:
-    if not await is_admin(query.from_user.id, settings):
-        await _answer_callback(query, "Только для администратора.", show_alert=True)
-        return
-    await _answer_callback(query, "Запускаю выгрузку CRM…")
-    started, job = await ensure_hollihop_sync_job(
-        query.bot,
-        query.message.chat.id,
+    await _start_crm_sync(
+        query,
+        settings,
         hollihop,
         openrouter,
-        label="данных CRM",
+        scope="all",
     )
-    if not started:
-        await query.message.answer(format_running_sync_message(job))
+
+
+@router.callback_query(F.data.startswith("admin:sync_crm:"))
+async def cb_sync_crm_scope(
+    query: CallbackQuery,
+    settings: Settings,
+    hollihop: HollihopClient,
+    openrouter: OpenRouterClient,
+) -> None:
+    scope = query.data.split(":")[-1]
+    if scope not in CRM_SCOPE_LABELS:
+        await _answer_callback(query, "Неизвестный тип выгрузки.", show_alert=True)
         return
+    await _start_crm_sync(
+        query,
+        settings,
+        hollihop,
+        openrouter,
+        scope=scope,
+    )
 
 
 @router.callback_query(F.data == "admin:sync_drive")

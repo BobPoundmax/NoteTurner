@@ -48,11 +48,15 @@ SYNC_INTENT_PHRASES: tuple[str, ...] = (
 
 SYNC_INTENT_REPLY = (
     "Сбор данных запускается вручную из меню <b>/admin</b>:\n"
-    "• <b>Загрузить CRM</b> — данные Hollihop (лиды, ученики, платежи);\n"
+    "• <b>Загрузить студентов</b> — сначала базовые карточки учеников;\n"
+    "• <b>Загрузить платежи</b> — платежи и балансы;\n"
+    "• <b>Загрузить лиды</b> — лиды и заявки;\n"
+    "• <b>Загрузить группы и расписание</b> — группы, связи и занятия;\n"
+    "• <b>Загрузить всё CRM</b> — полный прогон в порядке: студенты, платежи, лиды, остальное;\n"
     "• <b>Загрузить Google Drive</b> — документы и таблицы.\n\n"
     "После загрузки данные векторизуются и я смогу опираться на них в ответах. "
     "Для CRM также доступны точечные команды в личке администратора: "
-    "«обнови CRM», «обнови платежи», «обнови группы»."
+    "«обнови студентов», «обнови платежи», «обнови лиды», «обнови группы»."
 )
 
 
@@ -110,10 +114,12 @@ def detect_crm_refresh_scope(text: str) -> tuple[str, tuple[str, ...], str] | No
         return None
     if any(keyword in lowered for keyword in ("платеж", "оплат", "баланс", "долг", "задолж")):
         return ("finance", get_scope_record_types("finance"), "платежи и балансы")
+    if any(keyword in lowered for keyword in ("студент", "ученик")):
+        return ("students", get_scope_record_types("students"), "студентов")
     if any(keyword in lowered for keyword in ("групп", "заняти", "расписан", "урок")):
         return ("groups", get_scope_record_types("groups"), "группы и занятия")
     if any(keyword in lowered for keyword in ("лид", "заявк", "маркет")):
-        return ("marketing", get_scope_record_types("marketing"), "лиды и заявки")
+        return ("leads", get_scope_record_types("leads"), "лиды и заявки")
     if any(keyword in lowered for keyword in ("crm", "обнови", "обновить", "синхрониз", "выгрузи")):
         return ("all", get_scope_record_types("all"), "всю CRM")
     return None

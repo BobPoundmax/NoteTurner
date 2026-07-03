@@ -89,6 +89,19 @@ def test_scope_types_include_new_entities() -> None:
     assert ("balance", "GetBalances", "Balances", True) in ENDPOINTS
 
 
+def test_scope_priority_prefers_students_then_finance_then_leads() -> None:
+    assert cs.get_scope_record_types("students") == ("student",)
+    assert cs.get_scope_record_types("finance") == ("payment", "balance")
+    assert cs.get_scope_record_types("leads") == ("lead", "study_request")
+    assert cs.get_scope_record_types("all")[:5] == (
+        "student",
+        "payment",
+        "balance",
+        "lead",
+        "study_request",
+    )
+
+
 def test_edunit_serialization_splits_schedule_from_finance() -> None:
     record = {
         "Id": 1,

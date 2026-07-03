@@ -101,6 +101,11 @@ def test_admin_menu_includes_check_sources_button() -> None:
     }
 
     assert "admin:check_sources" in callback_data
+    assert "admin:sync_crm:students" in callback_data
+    assert "admin:sync_crm:finance" in callback_data
+    assert "admin:sync_crm:leads" in callback_data
+    assert "admin:sync_crm:groups" in callback_data
+    assert "admin:sync_crm:all" in callback_data
 
 
 async def test_answer_callback_ignores_expired_query() -> None:

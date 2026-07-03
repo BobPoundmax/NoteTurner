@@ -39,6 +39,7 @@ def test_data_coverage_intent_ignores_regular_questions() -> None:
 
 def test_detect_crm_refresh_scope() -> None:
     assert detect_crm_refresh_scope("обнови платежи за сегодня")[0] == "finance"
+    assert detect_crm_refresh_scope("обнови студентов")[0] == "students"
     assert detect_crm_refresh_scope("синхронизируй группы")[0] == "groups"
-    assert detect_crm_refresh_scope("обнови лиды и заявки")[0] == "marketing"
+    assert detect_crm_refresh_scope("обнови лиды и заявки")[0] == "leads"
     assert detect_crm_refresh_scope("загрузи google drive") is None
