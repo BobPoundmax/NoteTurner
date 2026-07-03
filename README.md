@@ -49,8 +49,12 @@ uvicorn noteturner.main:app --reload --app-dir src
 | `OPENROUTER_API_KEY` | Ключ OpenRouter |
 | `HOLLIHOP_SUBDOMAIN` | Субдомен CRM (`school` → `school.t8s.ru`) |
 | `HOLLIHOP_AUTH_KEY` | API-ключ (Настройки → Интеграция → API) |
-| `GDRIVE_FOLDER_ID` | ID папки Google Drive с материалами (из URL папки) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | JSON-ключ сервисного аккаунта Google (целиком) |
+| `GDRIVE_FOLDER_ID` | ID папки Google Drive (из URL папки, см. ниже) |
+| `GOOGLE_PROJECT_ID` | Поле `project_id` из JSON-ключа |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Поле `client_email` — этот email добавьте в «Поделиться» папкой |
+| `GOOGLE_PRIVATE_KEY_ID` | Поле `private_key_id` из JSON-ключа |
+| `GOOGLE_PRIVATE_KEY` | Поле `private_key` из JSON-ключа (можно с `\n` в одной строке) |
+| `GOOGLE_CLIENT_ID` | Поле `client_id` из JSON-ключа |
 | `EMBEDDING_MODEL` | Модель эмбеддингов OpenRouter (по умолч. `openai/text-embedding-3-small`) |
 
 ## Деплой на Render
@@ -63,6 +67,8 @@ uvicorn noteturner.main:app --reload --app-dir src
    - `WEBHOOK_BASE_URL` = URL вашего сервиса (`https://noteturner-xxxx.onrender.com`)
    - `OPENROUTER_API_KEY`
    - `HOLLIHOP_SUBDOMAIN`, `HOLLIHOP_AUTH_KEY`
+   - `GDRIVE_FOLDER_ID`, `GOOGLE_PROJECT_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`,
+     `GOOGLE_PRIVATE_KEY_ID`, `GOOGLE_PRIVATE_KEY`, `GOOGLE_CLIENT_ID` — см. раздел Google Drive
 4. Перезапустите сервис — webhook установится автоматически.
 5. Проверьте: `GET https://<your-service>/health`
 
@@ -136,12 +142,26 @@ uvicorn noteturner.main:app --reload --app-dir src
 
 1. В [Google Cloud Console](https://console.cloud.google.com/) создайте проект и включите
    **Google Drive API** и **Google Sheets API**.
-2. Создайте **Service Account** и сгенерируйте JSON-ключ.
-3. В Google Drive откройте доступ к папке на email сервисного аккаунта
-   (`...@...iam.gserviceaccount.com`) с ролью **Читатель**.
-4. Задайте env: `GDRIVE_FOLDER_ID` (ID папки из её URL) и `GOOGLE_SERVICE_ACCOUNT_JSON`
-   (содержимое JSON-ключа целиком).
+2. **IAM & Admin → Service Accounts** → создайте аккаунт → **Keys → Add key → Create new key → JSON**.
+   Скачается файл вида `virtuozy-xxxxx.json`. Откройте его в блокноте.
+3. В Google Drive: папка **Virtuozy** → **Поделиться** → добавьте значение **`client_email`**
+   из JSON (например `noteturner@virtuozy.iam.gserviceaccount.com`) с правом **Читатель**.
+4. Заполните переменные окружения по таблице ниже.
 5. В меню `/admin` нажмите **Загрузить Google Drive** для выгрузки и векторизации.
+
+**Откуда брать значения** (из скачанного JSON и из браузера):
+
+| Переменная в Render / `.env` | Где взять |
+|---|---|
+| `GDRIVE_FOLDER_ID` | URL папки в Drive: `https://drive.google.com/drive/folders/ВОТ_ЭТОТ_ID` |
+| `GOOGLE_PROJECT_ID` | В JSON: `"project_id": "virtuozy"` |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | В JSON: `"client_email": "...@...iam.gserviceaccount.com"` |
+| `GOOGLE_PRIVATE_KEY_ID` | В JSON: `"private_key_id": "a1b2c3..."` |
+| `GOOGLE_PRIVATE_KEY` | В JSON: всё значение `"private_key": "-----BEGIN PRIVATE KEY-----\n..."` (можно вставить одной строкой) |
+| `GOOGLE_CLIENT_ID` | В JSON: `"client_id": "123456789"` |
+
+Это не отдельный «API key» из Credentials → API key — для доступа к вашим файлам нужен
+именно **JSON сервисного аккаунта** (шаг 2 выше).
 
 Финансовые файлы определяются эвристикой по имени (`FINANCIAL_KEYWORDS`) и, как и у
 CRM, доступны в контексте только администраторам.

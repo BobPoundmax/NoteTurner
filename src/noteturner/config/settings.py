@@ -30,11 +30,25 @@ class Settings(BaseSettings):
     hollihop_subdomain: str = ""
     hollihop_auth_key: str = ""
 
-    # Google Drive knowledge source
+    # Google Drive knowledge source (service account — fields from downloaded JSON key)
     gdrive_folder_id: str = ""
+    google_project_id: str = ""
+    google_service_account_email: str = ""
+    google_private_key_id: str = ""
+    google_private_key: str = ""
+    google_client_id: str = ""
+    # Optional fallback: paste the whole JSON key instead of separate fields above.
     google_service_account_json: str = ""
     # Filename keywords marking a file as financial (comma-separated, case-insensitive).
     financial_keywords: str = "финанс,оплат,payment,бюджет,budget,зарплат,выручк,revenue"
+
+    @field_validator("google_private_key", mode="before")
+    @classmethod
+    def normalize_google_private_key(cls, value: str) -> str:
+        if not value:
+            return value
+        # Render/env often stores PEM with literal \n sequences.
+        return value.replace("\\n", "\n").strip()
 
     @field_validator("hollihop_subdomain", mode="before")
     @classmethod
@@ -70,7 +84,40 @@ class Settings(BaseSettings):
 
     @property
     def gdrive_is_configured(self) -> bool:
-        return bool(self.gdrive_folder_id and self.google_service_account_json)
+        if not self.gdrive_folder_id.strip():
+            return False
+        if self.google_service_account_json.strip():
+            return True
+        return bool(
+            self.google_project_id.strip()
+            and self.google_service_account_email.strip()
+            and self.google_private_key.strip()
+            and self.google_private_key_id.strip()
+            and self.google_client_id.strip()
+        )
+
+    def google_service_account_info(self) -> dict[str, str]:
+        """Build a service-account dict for google-auth from env vars."""
+        if self.google_service_account_json.strip():
+            import json
+
+            return json.loads(self.google_service_account_json)
+
+        if not self.gdrive_is_configured:
+            raise ValueError("Google Drive service account is not configured")
+
+        return {
+            "type": "service_account",
+            "project_id": self.google_project_id.strip(),
+            "private_key_id": self.google_private_key_id.strip(),
+            "private_key": self.google_private_key.strip(),
+            "client_email": self.google_service_account_email.strip(),
+            "client_id": self.google_client_id.strip(),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "universe_domain": "googleapis.com",
+        }
 
     @property
     def financial_keyword_list(self) -> list[str]:

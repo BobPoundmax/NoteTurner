@@ -77,9 +77,9 @@ class GoogleDriveClient:
         from googleapiclient.discovery import build
 
         try:
-            info = json.loads(self._settings.google_service_account_json)
-        except json.JSONDecodeError as exc:
-            raise GoogleDriveError(f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {exc}") from exc
+            info = self._settings.google_service_account_info()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise GoogleDriveError(f"Invalid Google service account settings: {exc}") from exc
 
         credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
         self._drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
@@ -88,7 +88,10 @@ class GoogleDriveClient:
 
     async def list_files(self) -> list[DriveFile]:
         if not self.is_configured:
-            raise GoogleDriveError("Google Drive is not configured (GDRIVE_FOLDER_ID, GOOGLE_SERVICE_ACCOUNT_JSON)")
+            raise GoogleDriveError(
+                "Google Drive is not configured "
+                "(GDRIVE_FOLDER_ID + GOOGLE_PROJECT_ID / GOOGLE_SERVICE_ACCOUNT_EMAIL / …)"
+            )
         return await asyncio.to_thread(self._list_files_sync, self._settings.gdrive_folder_id)
 
     def _list_files_sync(self, folder_id: str) -> list[DriveFile]:
@@ -174,7 +177,10 @@ class GoogleDriveClient:
     async def health_check(self) -> dict[str, Any]:
         started = datetime.now(timezone.utc)
         if not self.is_configured:
-            return {"status": "skipped", "error": "GDRIVE_FOLDER_ID / GOOGLE_SERVICE_ACCOUNT_JSON not set"}
+            return {
+                "status": "skipped",
+                "error": "GDRIVE_FOLDER_ID or Google service account env vars not set",
+            }
         try:
             files = await self.list_files()
             return {

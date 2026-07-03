@@ -38,3 +38,19 @@ projects:
                 sync: false
               - key: HOLLIHOP_AUTH_KEY
                 sync: false
+              - key: GDRIVE_FOLDER_ID
+                sync: false
+              - key: GOOGLE_PROJECT_ID
+                sync: false
+              - key: GOOGLE_SERVICE_ACCOUNT_EMAIL
+                sync: false
+              - key: GOOGLE_PRIVATE_KEY_ID
+                sync: false
+              - key: GOOGLE_PRIVATE_KEY
+                sync: false
+              - key: GOOGLE_CLIENT_ID
+                sync: false
+              - key: EMBEDDING_MODEL
+                value: openai/text-embedding-3-small
+              - key: EMBEDDING_DIMENSIONS
+                value: "1536"
