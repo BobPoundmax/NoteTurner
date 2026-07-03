@@ -191,8 +191,8 @@ class GoogleDriveClient:
         # endregion
         return collected
 
-    def _probe_folder_sync(self, folder_id: str) -> int:
-        """Lightweight health probe: one page, no recursion."""
+    def _probe_folder_sync(self, folder_id: str) -> str:
+        """Lightweight health probe: verify folder is reachable (no full listing)."""
         with self._lock:
             # region agent log
             agent_log(
@@ -203,27 +203,25 @@ class GoogleDriveClient:
             )
             # endregion
             drive, _ = self._build_services()
-            response = (
+            meta = (
                 drive.files()
-                .list(
-                    q=f"'{folder_id}' in parents and trashed = false",
-                    fields="files(id)",
-                    pageSize=1,
+                .get(
+                    fileId=folder_id,
+                    fields="id,name,mimeType",
                     supportsAllDrives=True,
-                    includeItemsFromAllDrives=True,
                 )
                 .execute()
             )
-            count = len(response.get("files", []))
+            name = str(meta.get("name") or folder_id)
             # region agent log
             agent_log(
                 location="gdrive.py:_probe_folder_sync",
                 message="probe done",
-                data={"sample_count": count},
+                data={"folder_name": name, "mime_type": meta.get("mimeType")},
                 hypothesis_id="H2",
             )
             # endregion
-            return count
+            return name
 
     async def extract_text(self, file: DriveFile) -> str:
         return await asyncio.to_thread(self._extract_text_sync, file)
@@ -281,20 +279,20 @@ class GoogleDriveClient:
                 hypothesis_id="H1",
             )
             # endregion
-            sample_count = await asyncio.to_thread(
+            folder_name = await asyncio.to_thread(
                 self._probe_folder_sync, self._settings.gdrive_folder_id
             )
             # region agent log
             agent_log(
                 location="gdrive.py:health_check",
                 message="health_check ok",
-                data={"sample_count": sample_count},
+                data={"folder_name": folder_name},
                 hypothesis_id="H1",
             )
             # endregion
             return {
                 "status": "ok",
-                "files_count": sample_count,
+                "folder_name": folder_name,
                 "latency_ms": int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
             }
         except GoogleDriveError as exc:

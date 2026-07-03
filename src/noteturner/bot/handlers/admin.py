@@ -41,6 +41,8 @@ def _format_check(name: str, result: dict) -> str:
             extra = f" ({result['latency_ms']} ms)"
         if "locations_count" in result:
             extra = f" ({result['locations_count']} локаций)"
+        if "folder_name" in result:
+            extra = f" ({result['folder_name']})"
         if "files_count" in result:
             extra = f" ({result['files_count']} файлов)"
         return f"✅ {name}{extra}"
