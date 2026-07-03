@@ -35,3 +35,11 @@ def test_format_finished_sync_message_for_partial_vectorization_error() -> None:
     assert "Выгрузка платежей из Hollihop завершена" in message
     assert "payment: 10" in message
     assert "vectorization failed" in message
+
+
+def test_format_finished_sync_message_falls_back_for_empty_error() -> None:
+    result = CrmSyncResult(status="error", error="")
+
+    message = format_finished_sync_message("данных CRM", result)
+
+    assert "неизвестная ошибка" in message

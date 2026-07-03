@@ -60,7 +60,7 @@ def format_finished_sync_message(label: str, result: CrmSyncResult) -> str:
             f"(из них финансовых {result.financial_processed}), "
             f"векторизовано {result.chunks_processed}. {by_type}.{note}"
         )
-    return f"❌ Ошибка выгрузки {label} из Hollihop: {result.error}"
+    return f"❌ Ошибка выгрузки {label} из Hollihop: {result.error or 'неизвестная ошибка'}"
 
 
 def format_last_sync_message(run: SyncRun | None) -> str:

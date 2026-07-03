@@ -9,6 +9,13 @@ from noteturner.config.settings import Settings
 logger = logging.getLogger(__name__)
 
 
+def _format_httpx_error(exc: httpx.HTTPError) -> str:
+    details = str(exc).strip()
+    if details:
+        return f"Network error: {exc.__class__.__name__}: {details}"
+    return f"Network error: {exc.__class__.__name__}"
+
+
 class OpenRouterError(Exception):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -61,8 +68,11 @@ class OpenRouterClient:
 
         url = f"{self._settings.openrouter_base_url.rstrip('/')}/chat/completions"
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload, headers=self._headers())
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(url, json=payload, headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise OpenRouterError(_format_httpx_error(exc)) from exc
 
         if response.status_code >= 400:
             raise OpenRouterError(
@@ -97,8 +107,11 @@ class OpenRouterClient:
         payload = {"model": resolved_model, "input": inputs}
         url = f"{self._settings.openrouter_base_url.rstrip('/')}/embeddings"
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload, headers=self._headers())
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(url, json=payload, headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise OpenRouterError(_format_httpx_error(exc)) from exc
 
         if response.status_code >= 400:
             raise OpenRouterError(

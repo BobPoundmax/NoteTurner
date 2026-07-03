@@ -11,6 +11,13 @@ from noteturner.config.settings import Settings
 logger = logging.getLogger(__name__)
 
 
+def _format_httpx_error(exc: httpx.HTTPError) -> str:
+    details = str(exc).strip()
+    if details:
+        return f"Network error: {exc.__class__.__name__}: {details}"
+    return f"Network error: {exc.__class__.__name__}"
+
+
 class HollihopError(Exception):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -53,8 +60,11 @@ class HollihopClient:
         url = f"{self._settings.hollihop_base_url}/{function_name}"
         query_params = {"authkey": self._settings.hollihop_auth_key, **params}
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, params=query_params)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=query_params)
+        except httpx.HTTPError as exc:
+            raise HollihopError(_format_httpx_error(exc)) from exc
 
         if response.status_code >= 400:
             raise HollihopError(
