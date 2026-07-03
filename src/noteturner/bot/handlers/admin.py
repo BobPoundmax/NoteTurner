@@ -22,14 +22,18 @@ from noteturner.db.repositories import admins as admins_repo
 from noteturner.db.repositories.chats import count_chats_by_role, upsert_chat
 from noteturner.db.repositories.collector import count_collector_messages
 from noteturner.db.repositories.query_logs import count_query_logs
-from noteturner.db.repositories.sync import count_raw_records, recent_sync_runs
-from noteturner.db.repositories.vectors import count_doc_chunks_by_source
+from noteturner.db.repositories.sync import count_raw_records, count_raw_records_by_type, recent_sync_runs
+from noteturner.db.repositories.vectors import count_doc_chunks_by_record_type, count_doc_chunks_by_source
 from noteturner.db.session import check_database, session_scope
 from noteturner.integrations.gdrive import DriveListResult, GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
-from noteturner.services.drive_sync import run_drive_sync
-from noteturner.services.sync_jobs import ensure_hollihop_sync_job, format_running_sync_message
+from noteturner.services.sync_jobs import (
+    ensure_drive_sync_job,
+    ensure_hollihop_sync_job,
+    format_running_drive_sync_message,
+    format_running_sync_message,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -531,30 +535,15 @@ async def cb_sync_drive(
         await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
     await _answer_callback(query, "Запускаю загрузку Google Drive…")
-    status_message = await query.message.answer("⏳ Оцениваю количество файлов в Google Drive…")
-
-    last_status_text = status_message.text or ""
-
-    async def report_progress(update) -> None:
-        nonlocal last_status_text
-        if not update.message or update.message == last_status_text:
-            return
-        last_status_text = update.message
-        await status_message.edit_text(update.message)
-
-    result = await run_drive_sync(gdrive, openrouter, settings, progress=report_progress)
-
-    if result.status == "ok":
-        by_type = ", ".join(f"{k}: {v}" for k, v in result.per_type.items()) or "нет файлов"
-        note = f"\n⚠️ Часть файлов пропущена: {result.error}" if result.error else ""
-        hint = f"\n\n{result.hint}" if result.hint else ""
-        await query.message.answer(
-            f"✅ Google Drive sync завершён. Найдено {result.files_discovered}, обработано {result.files_processed}, "
-            f"чанков: {result.chunks_processed} (финансовых файлов {result.financial_files}). "
-            f"{by_type}.{note}{hint}"
-        )
-    else:
-        await query.message.answer(f"❌ Ошибка Google Drive sync: {result.error}")
+    started, job = await ensure_drive_sync_job(
+        query.bot,
+        query.message.chat.id,
+        gdrive,
+        openrouter,
+        settings,
+    )
+    if not started:
+        await query.message.answer(format_running_drive_sync_message(job))
 
 
 @router.callback_query(F.data == "admin:stats")
@@ -569,7 +558,9 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
             roles = await count_chats_by_role(session)
             collector_count = await count_collector_messages(session)
             raw_count = await count_raw_records(session)
+            raw_by_type = await count_raw_records_by_type(session, source="hollihop")
             chunks_by_source = await count_doc_chunks_by_source(session)
+            chunk_by_type = await count_doc_chunks_by_record_type(session, source="hollihop")
             query_count = await count_query_logs(session)
             runs = await recent_sync_runs(session, limit=3)
     except RuntimeError:
@@ -586,6 +577,17 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
         f"CRM {chunks_by_source.get('hollihop', 0)}",
         f"Запросов к ассистенту: {query_count}",
     ]
+    if raw_by_type:
+        lines.append("")
+        lines.append(
+            "CRM по типам: "
+            + ", ".join(f"{name} {count}" for name, count in sorted(raw_by_type.items()))
+        )
+    if chunk_by_type:
+        lines.append(
+            "CRM чанки: "
+            + ", ".join(f"{name} {count}" for name, count in sorted(chunk_by_type.items()))
+        )
     if runs:
         lines.append("")
         lines.append("Последние синхронизации:")

@@ -2,11 +2,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from noteturner.db.repositories.vectors import search_chunks
+from noteturner.db.repositories.vectors import ChunkMatch, search_chunk_matches
 from noteturner.db.session import session_scope
 from noteturner.integrations.openrouter import OpenRouterClient, OpenRouterError
 
 logger = logging.getLogger(__name__)
+MAX_VECTOR_DISTANCE = 0.72
 
 
 @dataclass
@@ -15,6 +16,7 @@ class SourceChunk:
     source: str
     source_type: str | None = None
     record_type: str | None = None
+    distance: float | None = None
 
 
 @dataclass
@@ -43,8 +45,8 @@ GROUP_KEYWORDS = (
     "урок",
     "учебн",
     "преподав",
-    "договор",
-    "плательщ",
+    "завтра",
+    "сегодня",
 )
 MARKETING_KEYWORDS = ("лид", "заявк", "utm", "источник", "обращен")
 CRM_KEYWORDS = ("crm", "ученик", "клиент", "компан", "hollihop")
@@ -55,13 +57,19 @@ def classify_query_preferences(question: str) -> QueryPreferences:
     if any(keyword in text for keyword in FINANCE_KEYWORDS):
         return QueryPreferences(
             preferred_sources=["hollihop"],
-            preferred_record_types=["balance", "payment", "edunit_student", "edunit"],
+            preferred_record_types=["balance", "payment", "group_payer", "group_fiscal"],
             requires_corporate_context=True,
         )
     if any(keyword in text for keyword in GROUP_KEYWORDS):
         return QueryPreferences(
             preferred_sources=["hollihop"],
-            preferred_record_types=["edunit", "edunit_student", "student"],
+            preferred_record_types=[
+                "schedule_item",
+                "schedule_day",
+                "edunit",
+                "edunit_student",
+                "student",
+            ],
             requires_corporate_context=True,
         )
     if any(keyword in text for keyword in MARKETING_KEYWORDS):
@@ -81,6 +89,10 @@ def classify_query_preferences(question: str) -> QueryPreferences:
                 "study_request",
                 "edunit",
                 "edunit_student",
+                "schedule_item",
+                "schedule_day",
+                "group_payer",
+                "group_fiscal",
             ],
             requires_corporate_context=True,
         )
@@ -107,16 +119,15 @@ class VectorRetriever:
         self._limit = limit
 
     @staticmethod
-    def _dedupe(chunks: list) -> list:
-        seen: set[tuple[str, str, str]] = set()
-        unique = []
-        for chunk in chunks:
+    def _dedupe_matches(matches: list[ChunkMatch]) -> list[ChunkMatch]:
+        best_by_key: dict[tuple[str, str, str], ChunkMatch] = {}
+        for match in matches:
+            chunk = match.chunk
             key = (chunk.source, chunk.external_id, chunk.content)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(chunk)
-        return unique
+            existing = best_by_key.get(key)
+            if existing is None or match.distance < existing.distance:
+                best_by_key[key] = match
+        return list(best_by_key.values())
 
     async def retrieve(self, query: str, *, include_financial: bool) -> list[SourceChunk]:
         preferences = classify_query_preferences(query)
@@ -130,36 +141,55 @@ class VectorRetriever:
 
         try:
             async with session_scope() as session:
-                chunks = []
+                preferred_matches: list[ChunkMatch] = []
+                broad_matches: list[ChunkMatch] = []
                 if preferences.preferred_sources or preferences.preferred_record_types:
-                    chunks.extend(
-                        await search_chunks(
-                            session,
-                            embedding=embeddings[0],
-                            include_financial=include_financial,
-                            sources=preferences.preferred_sources or None,
-                            record_types=preferences.preferred_record_types or None,
-                            limit=max(2, min(3, self._limit)),
-                        )
+                    preferred_matches = await search_chunk_matches(
+                        session,
+                        embedding=embeddings[0],
+                        include_financial=include_financial,
+                        sources=preferences.preferred_sources or None,
+                        record_types=preferences.preferred_record_types or None,
+                        limit=max(self._limit, self._limit * 2),
+                        max_distance=MAX_VECTOR_DISTANCE,
                     )
-                chunks.extend(
-                    await search_chunks(
+                if not preferred_matches or len(preferred_matches) < self._limit:
+                    broad_matches = await search_chunk_matches(
                         session,
                         embedding=embeddings[0],
                         include_financial=include_financial,
                         limit=max(self._limit, self._limit * 2),
+                        max_distance=MAX_VECTOR_DISTANCE,
+                    )
+                matches = self._dedupe_matches([*preferred_matches, *broad_matches])
+                matches.sort(
+                    key=lambda match: (
+                        0
+                        if not preferences.preferred_record_types
+                        or match.chunk.record_type in preferences.preferred_record_types
+                        else 1,
+                        match.distance,
                     )
                 )
-                chunks = self._dedupe(chunks)[: self._limit]
+                matches = matches[: self._limit]
         except RuntimeError:
             return []
 
+        if matches:
+            logger.info(
+                "Retriever query=%r preferred_types=%s matches=%s",
+                query[:120],
+                preferences.preferred_record_types,
+                [f"{match.chunk.record_type}:{match.distance:.3f}" for match in matches],
+            )
+
         return [
             SourceChunk(
-                text=chunk.content,
-                source=chunk.title or chunk.source,
-                source_type=chunk.source,
-                record_type=chunk.record_type,
+                text=match.chunk.content,
+                source=match.chunk.title or match.chunk.source,
+                source_type=match.chunk.source,
+                record_type=match.chunk.record_type,
+                distance=match.distance,
             )
-            for chunk in chunks
+            for match in matches
         ]

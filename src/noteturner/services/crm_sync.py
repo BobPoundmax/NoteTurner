@@ -25,6 +25,10 @@ SOURCE = "hollihop"
 EMBED_BATCH = 64
 DEFAULT_PAGE_SIZE = 200
 MAX_RECORDS_PER_TYPE = 5000
+SCHEDULE_ITEM_RECORD_TYPE = "schedule_item"
+SCHEDULE_DAY_RECORD_TYPE = "schedule_day"
+GROUP_PAYER_RECORD_TYPE = "group_payer"
+GROUP_FISCAL_RECORD_TYPE = "group_fiscal"
 
 SYNC_SCOPE_TYPES: dict[str, tuple[str, ...]] = {
     "all": ("lead", "student", "payment", "study_request", "edunit", "edunit_student", "balance"),
@@ -62,6 +66,9 @@ ProgressReporter = Callable[[CrmSyncProgress], Awaitable[None]]
 class VectorChunkSpec:
     content: str
     payload: dict[str, Any] | None = None
+    record_type: str | None = None
+    title: str | None = None
+    is_financial: bool | None = None
 
 
 @dataclass
@@ -253,6 +260,23 @@ def _format_json_object(title: str, value: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def _build_chunk_payload(
+    base_payload: dict[str, Any],
+    *,
+    section: str | None = None,
+    extra: dict[str, Any] | None = None,
+    is_financial: bool | None = None,
+) -> dict[str, Any]:
+    payload = dict(base_payload)
+    if section is not None:
+        payload["chunk_section"] = section
+    if is_financial is not None:
+        payload["is_financial"] = is_financial
+    if extra:
+        payload.update({key: value for key, value in extra.items() if value is not None})
+    return payload
+
+
 def _build_external_id(config: EntitySyncConfig, record: dict[str, Any]) -> str:
     parts = [_clean(record.get(field)) for field in config.id_fields]
     if all(part is not None for part in parts):
@@ -294,8 +318,14 @@ def _build_vector_payload(
         "office_or_company_id": record.get("OfficeOrCompanyId") or record.get("EdUnitOfficeOrCompanyId"),
         "client_id": record.get("ClientId"),
         "student_client_id": record.get("StudentClientId"),
+        "student_name": record.get("StudentName") or _full_name(
+            record.get("LastName"),
+            record.get("FirstName"),
+            record.get("MiddleName"),
+        ),
         "lead_id": record.get("LeadId"),
         "edunit_id": record.get("EdUnitId") or record.get("Id") if config.record_type == "edunit" else record.get("EdUnitId"),
+        "group_name": record.get("Name") or record.get("EdUnitName"),
         "status": record.get("Status"),
         "updated_at": record.get("Updated") or record.get("Created"),
     }
@@ -317,27 +347,39 @@ def _make_synced_record(
     summary_lines: list[str],
     detail_sections: list[tuple[str, list[str]]],
     sync_meta: dict[str, Any],
+    main_is_financial: bool | None = None,
 ) -> SyncedRecord:
     external_id = _build_external_id(config, record)
+    chunk_is_financial = config.is_financial if main_is_financial is None else main_is_financial
     payload = _build_vector_payload(
         config,
         record,
-        is_financial=config.is_financial,
+        is_financial=chunk_is_financial,
         sync_meta=sync_meta,
     )
     main_lines = [title, *summary_lines]
     main_content = "\n".join(line for line in main_lines if line.strip())
-    chunks = [VectorChunkSpec(content=main_content, payload=payload)]
+    chunks = [
+        VectorChunkSpec(
+            content=main_content,
+            payload=payload,
+            record_type=config.record_type,
+            title=title,
+            is_financial=chunk_is_financial,
+        )
+    ]
 
     for section_name, lines in detail_sections:
         if not lines:
             continue
-        section_payload = dict(payload)
-        section_payload["chunk_section"] = section_name.lower()
+        section_payload = _build_chunk_payload(payload, section=section_name.lower())
         chunks.append(
             VectorChunkSpec(
                 content="\n".join([title, f"{section_name}:", *lines]),
                 payload=section_payload,
+                record_type=config.record_type,
+                title=title,
+                is_financial=chunk_is_financial,
             )
         )
 
@@ -347,9 +389,164 @@ def _make_synced_record(
         title=title,
         content=main_content,
         payload=payload,
-        is_financial=config.is_financial,
+        is_financial=chunk_is_financial,
         vector_chunks=chunks,
     )
+
+
+def _append_schedule_chunks(
+    chunks: list[VectorChunkSpec],
+    *,
+    title: str,
+    payload: dict[str, Any],
+    schedule_items: list[dict[str, Any]] | None,
+) -> None:
+    for index, item in enumerate(schedule_items or []):
+        lines = _scalar_lines(
+            item,
+            [
+                ("BeginDate", "BeginDate"),
+                ("EndDate", "EndDate"),
+                ("BeginTime", "BeginTime"),
+                ("EndTime", "EndTime"),
+                ("Teachers", "Teachers"),
+                ("ClassroomName", "Classroom"),
+            ],
+        )
+        if not lines:
+            continue
+        chunks.append(
+            VectorChunkSpec(
+                content="\n".join([title, "ScheduleItem:", *lines]),
+                payload=_build_chunk_payload(
+                    payload,
+                    section="schedule_item",
+                    extra={
+                        "schedule_index": index,
+                        "begin_date": _clean(item.get("BeginDate")),
+                        "end_date": _clean(item.get("EndDate")),
+                        "begin_time": _clean(item.get("BeginTime")),
+                        "end_time": _clean(item.get("EndTime")),
+                        "teacher": _clean(item.get("Teachers")),
+                        "classroom": _clean(item.get("ClassroomName")),
+                    },
+                    is_financial=False,
+                ),
+                record_type=SCHEDULE_ITEM_RECORD_TYPE,
+                title=title,
+                is_financial=False,
+            )
+        )
+
+
+def _append_day_chunks(
+    chunks: list[VectorChunkSpec],
+    *,
+    title: str,
+    payload: dict[str, Any],
+    days: list[dict[str, Any]] | None,
+) -> None:
+    for index, item in enumerate(days or []):
+        lines = _scalar_lines(
+            item,
+            [
+                ("Date", "Date"),
+                ("Minutes", "Minutes"),
+                ("Pass", "Pass"),
+                ("Description", "Description"),
+            ],
+        )
+        if not lines:
+            continue
+        chunks.append(
+            VectorChunkSpec(
+                content="\n".join([title, "ScheduleDay:", *lines]),
+                payload=_build_chunk_payload(
+                    payload,
+                    section="schedule_day",
+                    extra={
+                        "schedule_day_index": index,
+                        "day_date": _clean(item.get("Date")),
+                        "day_minutes": _clean(item.get("Minutes")),
+                        "day_pass": _clean(item.get("Pass")),
+                    },
+                    is_financial=False,
+                ),
+                record_type=SCHEDULE_DAY_RECORD_TYPE,
+                title=title,
+                is_financial=False,
+            )
+        )
+
+
+def _append_json_section_chunk(
+    chunks: list[VectorChunkSpec],
+    *,
+    title: str,
+    section_name: str,
+    payload: dict[str, Any],
+    section_payload_extra: dict[str, Any] | None,
+    value: dict[str, Any] | None,
+    record_type: str,
+    is_financial: bool,
+) -> None:
+    lines = _format_json_object(section_name, value)
+    if not lines:
+        return
+    chunks.append(
+        VectorChunkSpec(
+            content="\n".join([title, *lines]),
+            payload=_build_chunk_payload(
+                payload,
+                section=section_name.lower(),
+                extra=section_payload_extra,
+                is_financial=is_financial,
+            ),
+            record_type=record_type,
+            title=title,
+            is_financial=is_financial,
+        )
+    )
+
+
+def _append_payer_chunks(
+    chunks: list[VectorChunkSpec],
+    *,
+    title: str,
+    payload: dict[str, Any],
+    payers: list[dict[str, Any]] | None,
+) -> None:
+    for index, payer in enumerate(payers or []):
+        lines = _scalar_lines(
+            payer,
+            [
+                ("ClientId", "ClientId"),
+                ("Name", "Name"),
+                ("ContractNumber", "Contract"),
+                ("PriceName", "Price"),
+            ],
+        )
+        if not lines:
+            continue
+        chunks.append(
+            VectorChunkSpec(
+                content="\n".join([title, "Payer:", *lines]),
+                payload=_build_chunk_payload(
+                    payload,
+                    section="payer",
+                    extra={
+                        "payer_index": index,
+                        "payer_client_id": _clean(payer.get("ClientId")),
+                        "contract_number": _clean(payer.get("ContractNumber")),
+                        "price_name": _clean(payer.get("PriceName")),
+                    },
+                    is_financial=True,
+                ),
+                record_type=GROUP_PAYER_RECORD_TYPE,
+                title=title,
+                is_financial=True,
+            )
+        )
 
 
 def _serialize_lead(config: EntitySyncConfig, record: dict[str, Any], sync_meta: dict[str, Any]) -> SyncedRecord:
@@ -496,13 +693,40 @@ def _serialize_edunit(config: EntitySyncConfig, record: dict[str, Any], sync_met
             [("Id", "Id"), ("FullName", "FullName")],
         )
     )
-    details = [
-        ("ExtraFields", _format_extra_fields("ExtraFields", record.get("ExtraFields"))),
-        ("Schedule", _format_schedule(record.get("ScheduleItems"))),
-        ("Days", _format_days(record.get("Days"))),
-        ("FiscalInfo", _format_json_object("FiscalInfo", record.get("FiscalInfo"))),
-    ]
-    return _make_synced_record(config, record, title=title, summary_lines=summary, detail_sections=details, sync_meta=sync_meta)
+    synced = _make_synced_record(
+        config,
+        record,
+        title=title,
+        summary_lines=summary,
+        detail_sections=[
+            ("ExtraFields", _format_extra_fields("ExtraFields", record.get("ExtraFields"))),
+        ],
+        sync_meta=sync_meta,
+        main_is_financial=False,
+    )
+    _append_schedule_chunks(
+        synced.vector_chunks,
+        title=title,
+        payload=synced.payload or {},
+        schedule_items=record.get("ScheduleItems"),
+    )
+    _append_day_chunks(
+        synced.vector_chunks,
+        title=title,
+        payload=synced.payload or {},
+        days=record.get("Days"),
+    )
+    _append_json_section_chunk(
+        synced.vector_chunks,
+        title=title,
+        section_name="FiscalInfo",
+        payload=synced.payload or {},
+        section_payload_extra={"group_name": _clean(record.get("Name"))},
+        value=record.get("FiscalInfo") if isinstance(record.get("FiscalInfo"), dict) else None,
+        record_type=GROUP_FISCAL_RECORD_TYPE,
+        is_financial=True,
+    )
+    return synced
 
 
 def _serialize_edunit_student(
@@ -531,13 +755,38 @@ def _serialize_edunit_student(
             ("StudyUnits", "StudyUnits"),
         ],
     )
-    details = [
-        ("StudentAgents", _format_named_items("StudentAgents", record.get("StudentAgents"), [("FirstName", "FirstName"), ("LastName", "LastName"), ("WhoIs", "WhoIs"), ("Phone", "Phone"), ("EMail", "Email")])),
-        ("StudentExtraFields", _format_extra_fields("StudentExtraFields", record.get("StudentExtraFields"))),
-        ("Payers", _format_payers(record.get("Payers"))),
-        ("Days", _format_days(record.get("Days"))),
-    ]
-    return _make_synced_record(config, record, title=title, summary_lines=summary, detail_sections=details, sync_meta=sync_meta)
+    synced = _make_synced_record(
+        config,
+        record,
+        title=title,
+        summary_lines=summary,
+        detail_sections=[
+            (
+                "StudentAgents",
+                _format_named_items(
+                    "StudentAgents",
+                    record.get("StudentAgents"),
+                    [("FirstName", "FirstName"), ("LastName", "LastName"), ("WhoIs", "WhoIs"), ("Phone", "Phone"), ("EMail", "Email")],
+                ),
+            ),
+            ("StudentExtraFields", _format_extra_fields("StudentExtraFields", record.get("StudentExtraFields"))),
+        ],
+        sync_meta=sync_meta,
+        main_is_financial=False,
+    )
+    _append_day_chunks(
+        synced.vector_chunks,
+        title=title,
+        payload=synced.payload or {},
+        days=record.get("Days"),
+    )
+    _append_payer_chunks(
+        synced.vector_chunks,
+        title=title,
+        payload=synced.payload or {},
+        payers=record.get("Payers"),
+    )
+    return synced
 
 
 def _serialize_balance(config: EntitySyncConfig, record: dict[str, Any], sync_meta: dict[str, Any]) -> SyncedRecord:
@@ -790,20 +1039,52 @@ async def _sync_entity(
     return records, next_cursor, next_meta, processed
 
 
-async def _embed_all(openrouter: OpenRouterClient, texts: list[str]) -> list[list[float]]:
+async def _embed_all(
+    openrouter: OpenRouterClient,
+    texts: list[str],
+    *,
+    on_batch: Callable[[int, int], Awaitable[None]] | None = None,
+) -> list[list[float]]:
     vectors: list[list[float]] = []
     for i in range(0, len(texts), EMBED_BATCH):
         batch = texts[i : i + EMBED_BATCH]
         vectors.extend(await openrouter.embed(batch))
+        if on_batch is not None:
+            await on_batch(min(i + len(batch), len(texts)), len(texts))
     return vectors
 
 
-async def _vectorize_records(openrouter: OpenRouterClient, records: list[SyncedRecord]) -> int:
+async def _vectorize_records(
+    openrouter: OpenRouterClient,
+    records: list[SyncedRecord],
+    *,
+    progress: ProgressReporter | None = None,
+    record_type: str | None = None,
+    records_processed: int = 0,
+    chunks_processed: int = 0,
+) -> int:
     if not records:
         return 0
 
     texts = [chunk.content for record in records for chunk in record.vector_chunks]
-    embeddings = await _embed_all(openrouter, texts)
+
+    async def report_batch(completed_chunks: int, total_chunks: int) -> None:
+        await _report_progress(
+            progress,
+            CrmSyncProgress(
+                stage="vectorizing_batch",
+                record_type=record_type,
+                records_processed=records_processed,
+                chunks_processed=chunks_processed + completed_chunks,
+                message=(
+                    f"⏳ CRM: векторизую {record_type or 'данные'} - "
+                    f"готово {completed_chunks}/{total_chunks} чанков "
+                    f"(всего записей {records_processed})."
+                ),
+            ),
+        )
+
+    embeddings = await _embed_all(openrouter, texts, on_batch=report_batch if progress is not None else None)
     stored = 0
     position = 0
 
@@ -816,9 +1097,9 @@ async def _vectorize_records(openrouter: OpenRouterClient, records: list[SyncedR
                         content=chunk.content,
                         embedding=embeddings[position],
                         chunk_index=chunk_index,
-                        title=record.title,
-                        record_type=record.record_type,
-                        is_financial=record.is_financial,
+                        title=chunk.title or record.title,
+                        record_type=chunk.record_type or record.record_type,
+                        is_financial=record.is_financial if chunk.is_financial is None else chunk.is_financial,
                         payload=chunk.payload,
                     )
                 )
@@ -934,7 +1215,14 @@ async def run_hollihop_sync(
                         len(records),
                         chunk_candidates,
                     )
-                    chunks_added = await _vectorize_records(openrouter, records)
+                    chunks_added = await _vectorize_records(
+                        openrouter,
+                        records,
+                        progress=progress,
+                        record_type=config.record_type,
+                        records_processed=result.records_processed,
+                        chunks_processed=result.chunks_processed,
+                    )
                     result.chunks_processed += chunks_added
                     await _report_progress(
                         progress,

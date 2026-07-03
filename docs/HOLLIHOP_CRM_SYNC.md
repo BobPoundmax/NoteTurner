@@ -20,12 +20,28 @@ and snapshot-based where it does not.
 
 ## Retrieval strategy
 
-- Finance questions should prefer Hollihop entities: `balance`, `payment`,
-  `edunit_student`, `edunit`.
-- Group and scheduling questions should prefer `edunit` and `edunit_student`.
+- Finance questions should prefer financial chunk types:
+  `balance`, `payment`, `group_payer`, `group_fiscal`.
+- Group and scheduling questions should prefer schedule-aware chunk types:
+  `schedule_item`, `schedule_day`, then `edunit` and `edunit_student`.
 - Marketing questions should prefer `study_request`, `lead`, `student`.
 - If no relevant CRM context is found, the bot should suggest refreshing CRM
   instead of hallucinating.
+
+## Vector chunk model
+
+- `lead`, `student`, `study_request`, `payment`, `balance` remain vectorized
+  largely as before.
+- `edunit` now produces:
+  - non-financial summary chunks (`edunit`);
+  - non-financial schedule chunks (`schedule_item`, `schedule_day`);
+  - financial chunks for fiscal metadata (`group_fiscal`).
+- `edunit_student` now produces:
+  - non-financial summary chunks (`edunit_student`);
+  - non-financial day/schedule chunks (`schedule_day`);
+  - financial payer chunks (`group_payer`).
+- This split allows non-admins to ask about groups and lessons without opening
+  access to fiscal or payer details.
 
 ## Freshness strategy
 
@@ -35,5 +51,8 @@ and snapshot-based where it does not.
   - `обнови CRM`
   - `обнови платежи`
   - `обнови группы`
+- Admins can also ask plain-language count questions like
+  `сколько у тебя данных в векторной базе по лидам и расписанию`, which should
+  be answered from DB counts directly instead of RAG.
 - Do not perform free-form live API lookup on every question; use limited,
   intent-driven refresh to avoid slow and brittle answers.

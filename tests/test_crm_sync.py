@@ -89,6 +89,59 @@ def test_scope_types_include_new_entities() -> None:
     assert ("balance", "GetBalances", "Balances", True) in ENDPOINTS
 
 
+def test_edunit_serialization_splits_schedule_from_finance() -> None:
+    record = {
+        "Id": 1,
+        "Name": "English A1",
+        "Discipline": "English",
+        "ScheduleItems": [
+            {
+                "BeginDate": "2026-07-04",
+                "EndDate": "2026-07-04",
+                "BeginTime": "10:00",
+                "EndTime": "11:00",
+                "Teachers": "Ivan",
+                "ClassroomName": "Room 1",
+            }
+        ],
+        "Days": [{"Date": "2026-07-04", "Minutes": 60, "Pass": False, "Description": "Lesson"}],
+        "FiscalInfo": {"Price": "1000"},
+    }
+
+    synced = cs._serialize_edunit(cs.ENTITY_CONFIGS["edunit"], record, {})
+
+    record_types = [chunk.record_type for chunk in synced.vector_chunks]
+    assert synced.is_financial is False
+    assert "schedule_item" in record_types
+    assert "schedule_day" in record_types
+    assert "group_fiscal" in record_types
+    schedule_chunk = next(chunk for chunk in synced.vector_chunks if chunk.record_type == "schedule_item")
+    fiscal_chunk = next(chunk for chunk in synced.vector_chunks if chunk.record_type == "group_fiscal")
+    assert schedule_chunk.is_financial is False
+    assert schedule_chunk.payload["begin_date"] == "2026-07-04"
+    assert fiscal_chunk.is_financial is True
+
+
+def test_edunit_student_serialization_splits_payers_from_schedule() -> None:
+    record = {
+        "EdUnitId": 1,
+        "StudentClientId": 2,
+        "EdUnitName": "English A1",
+        "StudentName": "Alice",
+        "Days": [{"Date": "2026-07-04", "Minutes": 60, "Pass": False, "Description": "Lesson"}],
+        "Payers": [{"ClientId": 9, "Name": "Parent", "ContractNumber": "C-1", "PriceName": "Base"}],
+    }
+
+    synced = cs._serialize_edunit_student(cs.ENTITY_CONFIGS["edunit_student"], record, {})
+
+    record_types = [chunk.record_type for chunk in synced.vector_chunks]
+    assert synced.is_financial is False
+    assert "schedule_day" in record_types
+    assert "group_payer" in record_types
+    payer_chunk = next(chunk for chunk in synced.vector_chunks if chunk.record_type == "group_payer")
+    assert payer_chunk.is_financial is True
+
+
 async def test_sync_entity_reports_page_progress(monkeypatch) -> None:
     class _FakeSession:
         async def commit(self) -> None:

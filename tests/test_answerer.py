@@ -5,6 +5,7 @@ import pytest
 from noteturner.integrations.openrouter import OpenRouterError
 from noteturner.services.llm.answerer import Answerer
 from noteturner.services.llm.prompts import PromptBuilder
+from noteturner.services.llm.retriever import SourceChunk
 from noteturner.services.llm.router import ModelRouter
 
 ROUTING = {
@@ -51,3 +52,24 @@ async def test_answerer_returns_refresh_hint_for_admin_data_question_without_con
 
     assert "локальном индексе CRM/Drive" in result.text
     openrouter.chat_completion.assert_not_called()
+
+
+async def test_answerer_skips_sources_for_unknown_reply() -> None:
+    openrouter = AsyncMock()
+    openrouter.chat_completion = AsyncMock(return_value="Не знаю. Недостаточно данных.")
+
+    retriever = AsyncMock()
+    retriever.retrieve = AsyncMock(
+        return_value=[SourceChunk(text="ctx", source="CRM payment #1", record_type="payment")]
+    )
+
+    answerer = Answerer(
+        openrouter,
+        router=ModelRouter(ROUTING),
+        prompt_builder=PromptBuilder(PROMPTS),
+        retriever=retriever,
+    )
+
+    result = await answerer.answer("Какие завтра уроки?", is_admin=True)
+
+    assert "📎 Источники" not in result.text

@@ -45,21 +45,38 @@ class Answerer:
         return "📎 Источники: " + ", ".join(seen)
 
     @staticmethod
-    def _no_context_reply(question: str) -> str | None:
+    def _no_context_reply(question: str, *, is_admin: bool) -> str | None:
         preferences = classify_query_preferences(question)
         if not preferences.requires_corporate_context:
             return None
+        if not is_admin:
+            return (
+                "Не нашёл релевантных данных в локальном индексе CRM/Drive. "
+                "Попросите администратора обновить источники или уточните вопрос."
+            )
         return (
             "Не нашёл релевантных данных в локальном индексе CRM/Drive. "
             "Обновите источники через /admin или попросите обновить нужный "
             "раздел CRM командой вроде «обнови платежи» или «обнови группы»."
         )
 
+    @staticmethod
+    def _should_attach_sources(reply: str) -> bool:
+        normalized = (reply or "").strip().lower()
+        negative_prefixes = (
+            "не знаю",
+            "не наш",
+            "не смог",
+            "нет данных",
+            "недостаточно данных",
+        )
+        return not normalized.startswith(negative_prefixes)
+
     async def answer(self, question: str, *, is_admin: bool) -> AnswerResult:
         tier = self._router.classify(question)
         context = await self._retriever.retrieve(question, include_financial=is_admin)
-        if is_admin and not context:
-            no_context_reply = self._no_context_reply(question)
+        if not context:
+            no_context_reply = self._no_context_reply(question, is_admin=is_admin)
             if no_context_reply is not None:
                 return AnswerResult(text=no_context_reply, model=None, tier=tier)
         messages = self._prompts.build(question, context, is_admin=is_admin)
@@ -74,7 +91,7 @@ class Answerer:
                 last_error = exc
                 continue
 
-            if context:
+            if context and self._should_attach_sources(reply):
                 reply = f"{reply}\n\n{self._format_sources(context)}"
             return AnswerResult(text=reply, model=model, tier=tier)
 

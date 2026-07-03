@@ -13,6 +13,7 @@ from noteturner.db.session import session_scope
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient, OpenRouterError
 from noteturner.services.crm_sync import get_scope_record_types
+from noteturner.services.data_coverage import build_data_coverage_message
 from noteturner.services.llm.answerer import Answerer
 from noteturner.services.llm.retriever import VectorRetriever
 from noteturner.services.sync_jobs import (
@@ -66,6 +67,40 @@ def is_sync_status_intent(text: str) -> bool:
     sync_markers = ("crm", "hollihop", "холихоп", "выгруз", "синхрон", "обновлен", "обновление")
     return any(marker in lowered for marker in status_markers) and any(
         marker in lowered for marker in sync_markers
+    )
+
+
+def is_data_coverage_intent(text: str) -> bool:
+    lowered = text.lower()
+    count_markers = (
+        "сколько",
+        "какие данные",
+        "что у тебя есть",
+        "сколько у тебя",
+        "объем",
+        "объём",
+        "статистика",
+        "покрытие",
+    )
+    data_markers = (
+        "вектор",
+        "индекс",
+        "база",
+        "бд",
+        "crm",
+        "лид",
+        "ученик",
+        "студент",
+        "платеж",
+        "баланс",
+        "финанс",
+        "расписан",
+        "урок",
+        "групп",
+        "заняти",
+    )
+    return any(marker in lowered for marker in count_markers) and any(
+        marker in lowered for marker in data_markers
     )
 
 
@@ -143,6 +178,13 @@ async def handle_assistant_message(
 
     if admin and is_sync_status_intent(user_text):
         await _reply_with_crm_sync_status(message)
+        return
+
+    if admin and is_data_coverage_intent(user_text):
+        try:
+            await message.answer(await build_data_coverage_message())
+        except RuntimeError:
+            await message.answer("Не могу показать покрытие данных: база данных не настроена.")
         return
 
     if admin and is_sync_intent(user_text):

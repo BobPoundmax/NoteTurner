@@ -17,6 +17,12 @@ class ChunkInput:
     payload: dict | None = None
 
 
+@dataclass
+class ChunkMatch:
+    chunk: DocChunk
+    distance: float
+
+
 async def replace_file_chunks(
     session: AsyncSession,
     *,
@@ -58,18 +64,47 @@ async def search_chunks(
     record_types: list[str] | None = None,
     limit: int = 5,
 ) -> list[DocChunk]:
-    """Return the closest chunks by cosine distance. Financial chunks are
-    excluded unless ``include_financial`` is True (i.e. the requester is admin)."""
-    stmt = select(DocChunk)
+    """Backward-compatible wrapper returning only chunks."""
+    matches = await search_chunk_matches(
+        session,
+        embedding=embedding,
+        include_financial=include_financial,
+        sources=sources,
+        record_types=record_types,
+        limit=limit,
+    )
+    return [match.chunk for match in matches]
+
+
+async def search_chunk_matches(
+    session: AsyncSession,
+    *,
+    embedding: list[float],
+    include_financial: bool,
+    sources: list[str] | None = None,
+    record_types: list[str] | None = None,
+    limit: int = 5,
+    max_distance: float | None = None,
+) -> list[ChunkMatch]:
+    """Return the closest chunks by cosine distance with optional filtering."""
+    distance_expr = DocChunk.embedding.cosine_distance(embedding).label("distance")
+    stmt = select(DocChunk, distance_expr)
     if not include_financial:
         stmt = stmt.where(DocChunk.is_financial.is_(False))
     if sources:
         stmt = stmt.where(DocChunk.source.in_(sources))
     if record_types:
         stmt = stmt.where(DocChunk.record_type.in_(record_types))
-    stmt = stmt.order_by(DocChunk.embedding.cosine_distance(embedding)).limit(limit)
+    stmt = stmt.order_by(distance_expr).limit(limit)
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+
+    matches: list[ChunkMatch] = []
+    for chunk, distance in result.all():
+        numeric_distance = float(distance)
+        if max_distance is not None and numeric_distance > max_distance:
+            continue
+        matches.append(ChunkMatch(chunk=chunk, distance=numeric_distance))
+    return matches
 
 
 async def count_doc_chunks(session: AsyncSession) -> int:
@@ -82,3 +117,18 @@ async def count_doc_chunks_by_source(session: AsyncSession) -> dict[str, int]:
         select(DocChunk.source, func.count()).group_by(DocChunk.source)
     )
     return {source: int(count) for source, count in result.all()}
+
+
+async def count_doc_chunks_by_record_type(
+    session: AsyncSession,
+    *,
+    source: str | None = None,
+    include_financial: bool = True,
+) -> dict[str, int]:
+    stmt = select(DocChunk.record_type, func.count()).group_by(DocChunk.record_type)
+    if source is not None:
+        stmt = stmt.where(DocChunk.source == source)
+    if not include_financial:
+        stmt = stmt.where(DocChunk.is_financial.is_(False))
+    result = await session.execute(stmt)
+    return {record_type: int(count) for record_type, count in result.all()}

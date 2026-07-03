@@ -89,6 +89,21 @@ async def count_raw_records(session: AsyncSession) -> int:
     return int(result.scalar_one())
 
 
+async def count_raw_records_by_type(
+    session: AsyncSession,
+    *,
+    source: str | None = None,
+    include_financial: bool = True,
+) -> dict[str, int]:
+    stmt = select(RawRecord.record_type, func.count()).group_by(RawRecord.record_type)
+    if source is not None:
+        stmt = stmt.where(RawRecord.source == source)
+    if not include_financial:
+        stmt = stmt.where(RawRecord.is_financial.is_(False))
+    result = await session.execute(stmt)
+    return {record_type: int(count) for record_type, count in result.all()}
+
+
 async def recent_sync_runs(session: AsyncSession, *, limit: int = 5) -> list[SyncRun]:
     result = await session.execute(
         select(SyncRun).order_by(SyncRun.started_at.desc()).limit(limit)
