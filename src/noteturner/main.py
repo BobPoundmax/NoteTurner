@@ -50,7 +50,6 @@ async def lifespan(app: FastAPI):
             await setup_webhook(bot, settings)
     else:
         logger.warning("TELEGRAM_BOT_TOKEN not set — bot disabled")
-
     yield
 
     if _polling_task is not None:

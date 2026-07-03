@@ -17,4 +17,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn noteturner.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn noteturner.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

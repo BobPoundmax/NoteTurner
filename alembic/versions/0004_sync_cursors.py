@@ -10,6 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 
 from alembic import op
+from noteturner.debug_runtime import agent_debug_log
 
 revision: str = "0004"
 down_revision: str | None = "0003"
@@ -18,6 +19,14 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # region agent log
+    agent_debug_log(
+        location="alembic/versions/0004_sync_cursors.py:24",
+        message="Migration 0004 upgrade entered",
+        data={},
+        hypothesis_id="A",
+    )
+    # endregion
     op.create_table(
         "sync_cursors",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -41,6 +50,14 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("source", "record_type", name="uq_sync_cursors_source_type"),
     )
+    # region agent log
+    agent_debug_log(
+        location="alembic/versions/0004_sync_cursors.py:52",
+        message="Migration 0004 create_table finished",
+        data={},
+        hypothesis_id="A",
+    )
+    # endregion
     op.create_index(op.f("ix_sync_cursors_source"), "sync_cursors", ["source"], unique=False)
     op.create_index(
         op.f("ix_sync_cursors_record_type"),
@@ -48,6 +65,14 @@ def upgrade() -> None:
         ["record_type"],
         unique=False,
     )
+    # region agent log
+    agent_debug_log(
+        location="alembic/versions/0004_sync_cursors.py:66",
+        message="Migration 0004 upgrade finished",
+        data={},
+        hypothesis_id="A",
+    )
+    # endregion
 
 
 def downgrade() -> None:
