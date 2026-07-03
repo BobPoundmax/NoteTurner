@@ -1,4 +1,8 @@
+from unittest.mock import AsyncMock
+
+from aiogram.exceptions import TelegramBadRequest
 from noteturner.bot.handlers.admin import (
+    _answer_callback,
     _do_remove_admin,
     _format_drive_discovery,
     _format_sync_health,
@@ -97,3 +101,18 @@ def test_admin_menu_includes_check_sources_button() -> None:
     }
 
     assert "admin:check_sources" in callback_data
+
+
+async def test_answer_callback_ignores_expired_query() -> None:
+    query = AsyncMock()
+    query.data = "admin:stats"
+    query.answer = AsyncMock(
+        side_effect=TelegramBadRequest(
+            method="answerCallbackQuery",
+            message="query is too old and response timeout expired or query ID is invalid",
+        )
+    )
+
+    result = await _answer_callback(query, "ok")
+
+    assert result is False

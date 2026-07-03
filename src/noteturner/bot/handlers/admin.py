@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -117,6 +118,23 @@ def _format_drive_discovery(discovery: DriveListResult) -> list[str]:
     if files_count == 0 and discovery.hint_when_empty:
         lines.append(f"⚠️ {discovery.hint_when_empty}")
     return lines
+
+
+async def _answer_callback(
+    query: CallbackQuery,
+    text: str | None = None,
+    *,
+    show_alert: bool = False,
+) -> bool:
+    try:
+        await query.answer(text, show_alert=show_alert)
+        return True
+    except TelegramBadRequest as exc:
+        error_text = str(exc).lower()
+        if "query is too old" in error_text or "query id is invalid" in error_text:
+            logger.info("Ignoring expired callback query: %s", query.data)
+            return False
+        raise
 
 
 async def _render_sources_status(
@@ -344,13 +362,13 @@ async def cmd_del_admin(message: Message, settings: Settings, command: CommandOb
 @router.callback_query(F.data == "admin:add_chat")
 async def cb_add_chat(query: CallbackQuery, settings: Settings, state: FSMContext) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
     await state.set_state(AddChatStates.waiting_for_chat_id)
     await query.message.answer(
         "Отправьте <b>chat_id</b> чата (число, например <code>-1001234567890</code>)."
     )
-    await query.answer()
+    await _answer_callback(query)
 
 
 @router.callback_query(F.data == "admin:check_sources")
@@ -361,9 +379,9 @@ async def cb_check_sources(
     gdrive: GoogleDriveClient,
 ) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
-    await query.answer("Проверяю источники…")
+    await _answer_callback(query, "Проверяю источники…")
     await query.message.answer(await _render_sources_status(hollihop, gdrive))
 
 
@@ -385,7 +403,7 @@ async def add_chat_id(message: Message, settings: Settings, state: FSMContext) -
 )
 async def add_chat_role(query: CallbackQuery, settings: Settings, state: FSMContext) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
     role = query.data.split(":")[-1]
     data = await state.get_data()
@@ -394,36 +412,36 @@ async def add_chat_role(query: CallbackQuery, settings: Settings, state: FSMCont
 
     if chat_id is None:
         await query.message.answer("Не удалось определить chat_id. Начните заново: /admin")
-        await query.answer()
+        await _answer_callback(query)
         return
 
     async with session_scope() as session:
         await upsert_chat(session, telegram_chat_id=chat_id, role=role)
 
     await query.message.answer(f"Чат <code>{chat_id}</code> сохранён с ролью <b>{role}</b>.")
-    await query.answer()
+    await _answer_callback(query)
 
 
 @router.callback_query(F.data == "admin:admins")
 async def cb_admins(query: CallbackQuery, settings: Settings) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
     await query.message.answer(await _render_admins(settings), reply_markup=admins_menu())
-    await query.answer()
+    await _answer_callback(query)
 
 
 @router.callback_query(F.data == "admin:admin_add")
 async def cb_admin_add(query: CallbackQuery, settings: Settings, state: FSMContext) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
     await state.set_state(AdminMgmtStates.waiting_for_add_id)
     await query.message.answer(
         "Отправьте <b>telegram_id</b>, <b>@username</b> "
         "или перешлите сообщение нового админа."
     )
-    await query.answer()
+    await _answer_callback(query)
 
 
 @router.message(StateFilter(AdminMgmtStates.waiting_for_add_id))
@@ -442,13 +460,13 @@ async def admin_add_id(message: Message, settings: Settings, state: FSMContext) 
 @router.callback_query(F.data == "admin:admin_del")
 async def cb_admin_del(query: CallbackQuery, settings: Settings, state: FSMContext) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
     await state.set_state(AdminMgmtStates.waiting_for_del_id)
     await query.message.answer(
         "Отправьте <b>telegram_id</b> или <b>@username</b> админа для удаления."
     )
-    await query.answer()
+    await _answer_callback(query)
 
 
 @router.message(StateFilter(AdminMgmtStates.waiting_for_del_id), F.text)
@@ -466,17 +484,17 @@ async def admin_del_id(message: Message, settings: Settings, state: FSMContext) 
 @router.callback_query(F.data == "admin:admin_list")
 async def cb_admin_list(query: CallbackQuery, settings: Settings) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
     await query.message.answer(await _render_admins(settings))
-    await query.answer()
+    await _answer_callback(query)
 
 
 @router.callback_query(F.data == "admin:cancel")
 async def cb_cancel(query: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    await _answer_callback(query)
     await query.message.answer("Отменено.")
-    await query.answer()
 
 
 @router.callback_query(F.data == "admin:sync_crm")
@@ -487,9 +505,9 @@ async def cb_sync_crm(
     openrouter: OpenRouterClient,
 ) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
-    await query.answer("Запускаю выгрузку CRM…")
+    await _answer_callback(query, "Запускаю выгрузку CRM…")
     started, job = await ensure_hollihop_sync_job(
         query.bot,
         query.message.chat.id,
@@ -510,9 +528,9 @@ async def cb_sync_drive(
     openrouter: OpenRouterClient,
 ) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
-    await query.answer("Запускаю загрузку Google Drive…")
+    await _answer_callback(query, "Запускаю загрузку Google Drive…")
     status_message = await query.message.answer("⏳ Оцениваю количество файлов в Google Drive…")
 
     last_status_text = status_message.text or ""
@@ -542,8 +560,9 @@ async def cb_sync_drive(
 @router.callback_query(F.data == "admin:stats")
 async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
     if not await is_admin(query.from_user.id, settings):
-        await query.answer("Только для администратора.", show_alert=True)
+        await _answer_callback(query, "Только для администратора.", show_alert=True)
         return
+    await _answer_callback(query)
 
     try:
         async with session_scope() as session:
@@ -555,7 +574,6 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
             runs = await recent_sync_runs(session, limit=3)
     except RuntimeError:
         await query.message.answer("База данных не настроена.")
-        await query.answer()
         return
 
     lines = [
@@ -576,4 +594,3 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
                 f"• {run.source} — {run.status} ({run.records_processed or 0} зап.)"
             )
     await query.message.answer("\n".join(lines))
-    await query.answer()
