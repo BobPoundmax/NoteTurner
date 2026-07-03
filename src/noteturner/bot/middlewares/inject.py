@@ -4,6 +4,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
 
 from noteturner.config.settings import Settings
+from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
 
@@ -14,10 +15,12 @@ class InjectDependenciesMiddleware(BaseMiddleware):
         settings: Settings,
         openrouter: OpenRouterClient,
         hollihop: HollihopClient,
+        gdrive: GoogleDriveClient,
     ) -> None:
         self.settings = settings
         self.openrouter = openrouter
         self.hollihop = hollihop
+        self.gdrive = gdrive
 
     async def __call__(
         self,
@@ -28,4 +31,5 @@ class InjectDependenciesMiddleware(BaseMiddleware):
         data["settings"] = self.settings
         data["openrouter"] = self.openrouter
         data["hollihop"] = self.hollihop
+        data["gdrive"] = self.gdrive
         return await handler(event, data)

@@ -22,9 +22,19 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_test_model: str = "google/gemma-2-9b-it:free"
 
+    # Embeddings (via OpenRouter /embeddings)
+    embedding_model: str = "openai/text-embedding-3-small"
+    embedding_dimensions: int = 1536
+
     # Hollihop CRM
     hollihop_subdomain: str = ""
     hollihop_auth_key: str = ""
+
+    # Google Drive knowledge source
+    gdrive_folder_id: str = ""
+    google_service_account_json: str = ""
+    # Filename keywords marking a file as financial (comma-separated, case-insensitive).
+    financial_keywords: str = "финанс,оплат,payment,бюджет,budget,зарплат,выручк,revenue"
 
     @field_validator("hollihop_subdomain", mode="before")
     @classmethod
@@ -57,6 +67,14 @@ class Settings(BaseSettings):
     def hollihop_base_url(self) -> str:
         subdomain = self.hollihop_subdomain.strip()
         return f"https://{subdomain}.t8s.ru/Api/V2"
+
+    @property
+    def gdrive_is_configured(self) -> bool:
+        return bool(self.gdrive_folder_id and self.google_service_account_json)
+
+    @property
+    def financial_keyword_list(self) -> list[str]:
+        return [kw.strip().lower() for kw in self.financial_keywords.split(",") if kw.strip()]
 
 
 @lru_cache

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from aiogram import Bot
 
 from noteturner.db.session import check_database
+from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
 
@@ -12,6 +13,7 @@ async def run_health_checks(
     bot: Bot | None,
     openrouter: OpenRouterClient,
     hollihop: HollihopClient,
+    gdrive: GoogleDriveClient,
 ) -> dict:
     checks: dict[str, dict] = {}
 
@@ -29,6 +31,8 @@ async def run_health_checks(
             "status": "skipped",
             "error": "HOLLIHOP_SUBDOMAIN / HOLLIHOP_AUTH_KEY not set",
         }
+
+    checks["gdrive"] = await gdrive.health_check()
 
     if bot is not None:
         try:

@@ -7,6 +7,7 @@ from aiogram.enums import ParseMode
 from noteturner.bot.handlers import admin, assistant, collector, ping
 from noteturner.bot.middlewares.chat_access import ChatAccessMiddleware
 from noteturner.config.settings import Settings
+from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
 
@@ -24,11 +25,13 @@ def create_dispatcher(
     settings: Settings,
     openrouter: OpenRouterClient,
     hollihop: HollihopClient,
+    gdrive: GoogleDriveClient,
 ) -> Dispatcher:
     dp = Dispatcher()
     dp["settings"] = settings
     dp["openrouter"] = openrouter
     dp["hollihop"] = hollihop
+    dp["gdrive"] = gdrive
 
     root_router = Router()
     root_router.include_router(ping.router)

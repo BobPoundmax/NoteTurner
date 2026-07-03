@@ -11,6 +11,7 @@ from noteturner.db.repositories.query_logs import add_query_log
 from noteturner.db.session import session_scope
 from noteturner.integrations.openrouter import OpenRouterClient, OpenRouterError
 from noteturner.services.llm.answerer import Answerer
+from noteturner.services.llm.retriever import VectorRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,10 @@ async def handle_assistant_message(
     user_id = message.from_user.id if message.from_user else None
     admin = await is_admin(user_id, settings)
 
+    retriever = VectorRetriever(openrouter) if settings.gdrive_is_configured else None
+
     try:
-        result = await Answerer(openrouter).answer(user_text, is_admin=admin)
+        result = await Answerer(openrouter, retriever=retriever).answer(user_text, is_admin=admin)
     except OpenRouterError as exc:
         await message.answer(f"Ошибка OpenRouter: {exc}")
         return

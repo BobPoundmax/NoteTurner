@@ -2,6 +2,8 @@
 
 Telegram-бот — корпоративный ассистент «Виртуозы». Собирает знания из CRM Hollihop и отвечает на вопросы сотрудников через OpenRouter.
 
+Спецификация проекта (цель, требования, дорожная карта по фазам, критерии приёмки): [docs/SPEC.md](docs/SPEC.md).
+
 ## Фаза 3 (текущая)
 
 - FastAPI + aiogram webhook на Render
@@ -47,6 +49,9 @@ uvicorn noteturner.main:app --reload --app-dir src
 | `OPENROUTER_API_KEY` | Ключ OpenRouter |
 | `HOLLIHOP_SUBDOMAIN` | Субдомен CRM (`school` → `school.t8s.ru`) |
 | `HOLLIHOP_AUTH_KEY` | API-ключ (Настройки → Интеграция → API) |
+| `GDRIVE_FOLDER_ID` | ID папки Google Drive с материалами (из URL папки) |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | JSON-ключ сервисного аккаунта Google (целиком) |
+| `EMBEDDING_MODEL` | Модель эмбеддингов OpenRouter (по умолч. `openai/text-embedding-3-small`) |
 
 ## Деплой на Render
 
@@ -87,7 +92,8 @@ uvicorn noteturner.main:app --reload --app-dir src
 
 - **Добавить чат** — ввод `chat_id` и выбор роли;
 - **Загрузить CRM** — ручная выгрузка Hollihop в `raw_records` (лиды, ученики и финансы);
-- **Статистика** — счётчики чатов, сообщений, CRM-записей и запросов;
+- **Загрузить Google Drive** — чтение файлов из папки, векторизация в `doc_chunks`;
+- **Статистика** — счётчики чатов, сообщений, CRM-записей, векторных чанков и запросов;
 - **Админы** — добавить/удалить/показать администраторов.
 
 ### Администраторы
@@ -115,8 +121,30 @@ uvicorn noteturner.main:app --reload --app-dir src
 
 Простые/короткие вопросы идут на дешёвую модель, аналитические — на более сильную.
 При ошибке модели используется следующая в списке, затем общий `fallback`.
-Подмешивание корпоративных данных (векторный поиск) появится в Фазе 4 — сейчас
-`Answerer` использует `NullRetriever` (ответы без внешнего контекста).
+Если настроен Google Drive, `Answerer` использует `VectorRetriever` и подмешивает
+релевантные фрагменты из корпоративных документов (с указанием источников). Без
+настроенного Drive применяется `NullRetriever` (ответы без внешнего контекста).
+
+## Google Drive как источник знаний (RAG)
+
+Бот может читать документы из папки Google Drive, извлекать текст (Google Docs,
+Таблицы, презентации, PDF), векторизовать через OpenRouter (`/embeddings`) и хранить
+векторы в PostgreSQL (`pgvector`, таблица `doc_chunks`). При вопросе ищутся ближайшие
+фрагменты и подмешиваются в ответ.
+
+Настройка доступа через **сервисный аккаунт** (боту, а не личному аккаунту):
+
+1. В [Google Cloud Console](https://console.cloud.google.com/) создайте проект и включите
+   **Google Drive API** и **Google Sheets API**.
+2. Создайте **Service Account** и сгенерируйте JSON-ключ.
+3. В Google Drive откройте доступ к папке на email сервисного аккаунта
+   (`...@...iam.gserviceaccount.com`) с ролью **Читатель**.
+4. Задайте env: `GDRIVE_FOLDER_ID` (ID папки из её URL) и `GOOGLE_SERVICE_ACCOUNT_JSON`
+   (содержимое JSON-ключа целиком).
+5. В меню `/admin` нажмите **Загрузить Google Drive** для выгрузки и векторизации.
+
+Финансовые файлы определяются эвристикой по имени (`FINANCIAL_KEYWORDS`) и, как и у
+CRM, доступны в контексте только администраторам.
 
 ### Финансовые данные
 
@@ -139,7 +167,7 @@ GET https://<subdomain>.t8s.ru/Api/V2/GetLocations?authkey=<key>
 src/noteturner/
 ├── main.py                  # FastAPI + webhook
 ├── config/settings.py
-├── integrations/            # OpenRouter, Hollihop
+├── integrations/            # OpenRouter, Hollihop, Google Drive
 ├── bot/
 │   ├── dispatcher.py
 │   ├── filters.py           # ChatRoleFilter
@@ -149,7 +177,8 @@ src/noteturner/
 ├── config/                  # settings + routing.yaml, prompts.yaml
 ├── services/
 │   ├── crm_sync.py          # ручная выгрузка Hollihop
-│   └── llm/                 # router, prompts, retriever, answerer
+│   ├── drive_sync.py        # выгрузка + векторизация Google Drive
+│   └── llm/                 # router, prompts, retriever (vector), answerer
 ├── health/checker.py
 └── db/
     ├── models.py            # chats, collector_messages, raw_records, ...

@@ -11,7 +11,10 @@ from sqlalchemy import (
     Text,
     func,
 )
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+EMBEDDING_DIM = 1536
 
 
 class Base(DeclarativeBase):
@@ -85,6 +88,26 @@ class SyncRun(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DocChunk(Base):
+    __tablename__ = "doc_chunks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(50), index=True)  # e.g. gdrive
+    external_id: Mapped[str] = mapped_column(String(100), index=True)  # source file id
+    record_type: Mapped[str] = mapped_column(String(50))  # doc | sheet | pdf | slides
+    title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
+    is_financial: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", index=True
+    )
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class QueryLog(Base):

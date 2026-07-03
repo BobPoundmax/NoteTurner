@@ -10,6 +10,7 @@ from noteturner.bot.middlewares.inject import InjectDependenciesMiddleware
 from noteturner.config.settings import Settings, get_settings
 from noteturner.db.session import close_db, init_db
 from noteturner.health.checker import run_health_checks
+from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
 
@@ -19,8 +20,9 @@ settings: Settings = get_settings()
 bot = create_bot(settings) if settings.telegram_bot_token else None
 openrouter = OpenRouterClient(settings)
 hollihop = HollihopClient(settings)
-dp = create_dispatcher(settings, openrouter, hollihop)
-dp.update.middleware(InjectDependenciesMiddleware(settings, openrouter, hollihop))
+gdrive = GoogleDriveClient(settings)
+dp = create_dispatcher(settings, openrouter, hollihop, gdrive)
+dp.update.middleware(InjectDependenciesMiddleware(settings, openrouter, hollihop, gdrive))
 
 _polling_task: asyncio.Task | None = None
 
@@ -70,7 +72,9 @@ app = FastAPI(title="Note Turner", lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict:
-    result = await run_health_checks(bot=bot, openrouter=openrouter, hollihop=hollihop)
+    result = await run_health_checks(
+        bot=bot, openrouter=openrouter, hollihop=hollihop, gdrive=gdrive
+    )
     if not result.get("critical_ok", True):
         raise HTTPException(status_code=503, detail=result)
     return result

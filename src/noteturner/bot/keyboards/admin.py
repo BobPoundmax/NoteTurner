@@ -6,6 +6,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Добавить чат", callback_data="admin:add_chat")
     builder.button(text="Загрузить CRM", callback_data="admin:sync_crm")
+    builder.button(text="Загрузить Google Drive", callback_data="admin:sync_drive")
     builder.button(text="Статистика", callback_data="admin:stats")
     builder.button(text="Админы", callback_data="admin:admins")
     builder.adjust(1)

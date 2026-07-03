@@ -12,10 +12,13 @@ from noteturner.db.repositories.chats import count_chats_by_role, upsert_chat
 from noteturner.db.repositories.collector import count_collector_messages
 from noteturner.db.repositories.query_logs import count_query_logs
 from noteturner.db.repositories.sync import count_raw_records, recent_sync_runs
+from noteturner.db.repositories.vectors import count_doc_chunks
 from noteturner.db.session import check_database, session_scope
+from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
 from noteturner.services.crm_sync import run_hollihop_sync
+from noteturner.services.drive_sync import run_drive_sync
 
 router = Router()
 
@@ -38,6 +41,8 @@ def _format_check(name: str, result: dict) -> str:
             extra = f" ({result['latency_ms']} ms)"
         if "locations_count" in result:
             extra = f" ({result['locations_count']} локаций)"
+        if "files_count" in result:
+            extra = f" ({result['files_count']} файлов)"
         return f"✅ {name}{extra}"
     if status == "skipped":
         return f"⏭ {name}: {result.get('error', 'not configured')}"
@@ -98,6 +103,7 @@ async def cmd_status(
     settings: Settings,
     openrouter: OpenRouterClient,
     hollihop: HollihopClient,
+    gdrive: GoogleDriveClient,
 ) -> None:
     user_id = message.from_user.id if message.from_user else None
     if not await is_admin(user_id, settings):
@@ -111,6 +117,7 @@ async def cmd_status(
         if hollihop.is_configured
         else {"status": "skipped", "error": "HOLLIHOP_SUBDOMAIN / HOLLIHOP_AUTH_KEY not set"}
     )
+    gd_result = await gdrive.health_check()
 
     bot_info = await message.bot.get_me()
     lines = [
@@ -119,6 +126,7 @@ async def cmd_status(
         _format_check("Database", db_result),
         _format_check("OpenRouter", or_result),
         _format_check("Hollihop CRM", hh_result),
+        _format_check("Google Drive", gd_result),
         "",
         f"Bot: @{bot_info.username}",
         f"Mode: {settings.bot_mode}",
@@ -309,6 +317,33 @@ async def cb_sync_crm(query: CallbackQuery, settings: Settings, hollihop: Hollih
         await query.message.answer(f"❌ Ошибка CRM sync: {result.error}")
 
 
+@router.callback_query(F.data == "admin:sync_drive")
+async def cb_sync_drive(
+    query: CallbackQuery,
+    settings: Settings,
+    gdrive: GoogleDriveClient,
+    openrouter: OpenRouterClient,
+) -> None:
+    if not await is_admin(query.from_user.id, settings):
+        await query.answer("Только для администратора.", show_alert=True)
+        return
+    await query.answer("Запускаю загрузку Google Drive…")
+    await query.message.answer("⏳ Читаю и векторизую файлы из Google Drive…")
+
+    result = await run_drive_sync(gdrive, openrouter, settings)
+
+    if result.status == "ok":
+        by_type = ", ".join(f"{k}: {v}" for k, v in result.per_type.items()) or "нет файлов"
+        note = f"\n⚠️ Часть файлов пропущена: {result.error}" if result.error else ""
+        await query.message.answer(
+            f"✅ Google Drive sync завершён. Файлов: {result.files_processed}, "
+            f"чанков: {result.chunks_processed} (финансовых файлов {result.financial_files}). "
+            f"{by_type}.{note}"
+        )
+    else:
+        await query.message.answer(f"❌ Ошибка Google Drive sync: {result.error}")
+
+
 @router.callback_query(F.data == "admin:stats")
 async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
     if not await is_admin(query.from_user.id, settings):
@@ -320,6 +355,7 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
             roles = await count_chats_by_role(session)
             collector_count = await count_collector_messages(session)
             raw_count = await count_raw_records(session)
+            chunk_count = await count_doc_chunks(session)
             query_count = await count_query_logs(session)
             runs = await recent_sync_runs(session, limit=3)
     except RuntimeError:
@@ -333,6 +369,7 @@ async def cb_stats(query: CallbackQuery, settings: Settings) -> None:
         f"Чаты: assistant {roles.get('assistant', 0)}, collector {roles.get('collector', 0)}",
         f"Сообщений collector: {collector_count}",
         f"CRM записей (raw): {raw_count}",
+        f"Векторных чанков (Drive): {chunk_count}",
         f"Запросов к ассистенту: {query_count}",
     ]
     if runs:

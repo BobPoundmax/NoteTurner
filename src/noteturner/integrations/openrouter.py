@@ -86,6 +86,35 @@ class OpenRouterClient:
             )
         return str(content).strip()
 
+    async def embed(self, inputs: list[str], *, model: str | None = None) -> list[list[float]]:
+        """Return embedding vectors for the given inputs via OpenRouter /embeddings."""
+        if not self.is_configured:
+            raise OpenRouterError("OpenRouter is not configured (OPENROUTER_API_KEY)")
+        if not inputs:
+            return []
+
+        resolved_model = model or self._settings.embedding_model
+        payload = {"model": resolved_model, "input": inputs}
+        url = f"{self._settings.openrouter_base_url.rstrip('/')}/embeddings"
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload, headers=self._headers())
+
+        if response.status_code >= 400:
+            raise OpenRouterError(
+                f"HTTP {response.status_code}: {response.text[:300]}",
+                status_code=response.status_code,
+            )
+
+        data = response.json()
+        items = data.get("data") or []
+        if len(items) != len(inputs):
+            raise OpenRouterError(
+                f"Embedding count mismatch: got {len(items)} for {len(inputs)} inputs"
+            )
+        ordered = sorted(items, key=lambda item: item.get("index", 0))
+        return [item["embedding"] for item in ordered]
+
     async def health_check(self) -> dict[str, Any]:
         started = datetime.now(timezone.utc)
         if not self.is_configured:
