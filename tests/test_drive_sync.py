@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import noteturner.services.drive_sync as ds
-from noteturner.integrations.gdrive import MIME_DOC, DriveFile
+from noteturner.config.settings import Settings
+from noteturner.integrations.gdrive import MIME_DOC, MIME_SHEET, DriveFile, DriveListResult
 from noteturner.services.drive_sync import chunk_text, is_financial_name
 
 
@@ -51,3 +53,60 @@ async def test_sync_file_embeds_and_stores(monkeypatch) -> None:
     assert kwargs["external_id"] == "f1"
     assert len(kwargs["chunks"]) == count
     assert kwargs["chunks"][0].record_type == "doc"
+
+
+async def test_run_drive_sync_reports_count_and_processing(monkeypatch) -> None:
+    class _FakeSession:
+        async def get(self, *_args, **_kwargs):
+            return object()
+
+    @asynccontextmanager
+    async def fake_scope():
+        yield _FakeSession()
+
+    monkeypatch.setattr(ds, "session_scope", fake_scope)
+    monkeypatch.setattr(ds, "create_sync_run", AsyncMock(return_value=SimpleNamespace(id=7)))
+    monkeypatch.setattr(ds, "finish_sync_run", AsyncMock())
+    monkeypatch.setattr(ds, "_sync_file", AsyncMock(side_effect=[2, 0]))
+
+    gdrive = AsyncMock()
+    gdrive.is_configured = True
+    gdrive.list_files_detailed = AsyncMock(
+        return_value=DriveListResult(
+            files=[
+                DriveFile(id="f1", name="Budget 2026", mime_type=MIME_DOC),
+                DriveFile(id="f2", name="Students", mime_type=MIME_SHEET),
+            ],
+            roots=[],
+            skipped_by_mime={},
+        )
+    )
+
+    openrouter = AsyncMock()
+    openrouter.is_configured = True
+    settings = Settings(financial_keywords="budget")
+
+    progress_updates = []
+
+    async def progress(update) -> None:
+        progress_updates.append(update)
+
+    result = await ds.run_drive_sync(gdrive, openrouter, settings, progress=progress)
+
+    assert result.status == "ok"
+    assert result.files_discovered == 2
+    assert result.files_processed == 2
+    assert result.chunks_processed == 2
+    assert result.financial_files == 1
+    assert result.per_type == {"doc": 1, "sheet": 1}
+    assert [update.stage for update in progress_updates] == [
+        "discovery",
+        "processing",
+        "processing",
+    ]
+    assert progress_updates[0].total_files == 2
+    assert "Найдено 2 файлов" in (progress_updates[0].message or "")
+    assert progress_updates[1].current_index == 1
+    assert progress_updates[1].file_name == "Budget 2026"
+    assert progress_updates[2].current_index == 2
+    assert progress_updates[2].file_name == "Students"
