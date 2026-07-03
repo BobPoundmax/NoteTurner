@@ -4,9 +4,7 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 
-from noteturner.bot.access import is_admin
 from noteturner.bot.utils import is_private_chat
-from noteturner.config.settings import Settings
 from noteturner.db.repositories.chats import get_chat_by_telegram_id
 from noteturner.db.session import session_scope
 
@@ -28,9 +26,8 @@ async def _resolve_role(telegram_chat_id: int) -> str | None:
 class ChatAccessMiddleware(BaseMiddleware):
     """Resolve the chat role and gate access for unregistered chats.
 
-    Registered chats get ``chat_role`` injected. Unregistered chats are blocked,
-    except the admin's private chat, which always acts as an assistant so the
-    admin can operate the bot before any chat is registered.
+    Registered chats get ``chat_role`` injected. Any private chat acts as an
+    assistant by default, while unregistered group chats stay silent.
     """
 
     async def __call__(
@@ -42,16 +39,11 @@ class ChatAccessMiddleware(BaseMiddleware):
         if not isinstance(event, Message):
             return await handler(event, data)
 
-        settings: Settings = data["settings"]
         role = await _resolve_role(event.chat.id)
 
         if role is None:
-            user_id = event.from_user.id if event.from_user else None
-            if is_private_chat(event) and await is_admin(user_id, settings):
+            if is_private_chat(event):
                 role = "assistant"
-            elif is_private_chat(event):
-                await event.answer("Чат не настроен. Обратитесь к администратору.")
-                return None
             else:
                 return None
 

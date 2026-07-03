@@ -31,18 +31,18 @@ async def test_admin_private_unregistered_acts_as_assistant() -> None:
     assert data["chat_role"] == "assistant"
 
 
-async def test_non_admin_private_unregistered_is_blocked() -> None:
+async def test_non_admin_private_unregistered_acts_as_assistant() -> None:
     settings = Settings(admin_telegram_id=1)
     middleware = ChatAccessMiddleware()
     handler = AsyncMock()
     message = _make_message(ChatType.PRIVATE, user_id=999)
     data: dict = {"settings": settings}
 
-    result = await middleware(handler, message, data)
+    await middleware(handler, message, data)
 
-    handler.assert_not_awaited()
-    message.answer.assert_awaited_once()
-    assert result is None
+    handler.assert_awaited_once()
+    message.answer.assert_not_awaited()
+    assert data["chat_role"] == "assistant"
 
 
 async def test_unregistered_group_is_silent() -> None:
