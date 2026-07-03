@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from noteturner.db.models import RawRecord, SyncRun
+from noteturner.db.models import RawRecord, SyncCursor, SyncRun
 
 
 async def create_sync_run(session: AsyncSession, *, source: str) -> SyncRun:
@@ -94,3 +94,47 @@ async def recent_sync_runs(session: AsyncSession, *, limit: int = 5) -> list[Syn
         select(SyncRun).order_by(SyncRun.started_at.desc()).limit(limit)
     )
     return list(result.scalars().all())
+
+
+async def get_sync_cursor(
+    session: AsyncSession,
+    *,
+    source: str,
+    record_type: str,
+) -> SyncCursor | None:
+    result = await session.execute(
+        select(SyncCursor).where(
+            SyncCursor.source == source,
+            SyncCursor.record_type == record_type,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_sync_cursor(
+    session: AsyncSession,
+    *,
+    source: str,
+    record_type: str,
+    cursor_kind: str,
+    cursor_value: str | None,
+    meta: dict | None = None,
+    last_records_processed: int = 0,
+) -> SyncCursor:
+    existing = await get_sync_cursor(session, source=source, record_type=record_type)
+    if existing is None:
+        existing = SyncCursor(
+            source=source,
+            record_type=record_type,
+            cursor_kind=cursor_kind,
+        )
+        session.add(existing)
+
+    existing.cursor_kind = cursor_kind
+    existing.cursor_value = cursor_value
+    existing.meta = meta
+    existing.last_records_processed = last_records_processed
+    existing.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(existing)
+    return existing

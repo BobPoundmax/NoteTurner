@@ -42,3 +42,12 @@ async def test_answerer_raises_when_all_models_fail() -> None:
 
     with pytest.raises(OpenRouterError):
         await _answerer(openrouter).answer("вопрос", is_admin=False)
+
+
+async def test_answerer_returns_refresh_hint_for_admin_data_question_without_context() -> None:
+    openrouter = AsyncMock()
+
+    result = await _answerer(openrouter).answer("Какие долги по ученику?", is_admin=True)
+
+    assert "локальном индексе CRM/Drive" in result.text
+    openrouter.chat_completion.assert_not_called()

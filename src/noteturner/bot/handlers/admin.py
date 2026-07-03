@@ -371,16 +371,25 @@ async def cb_sync_drive(
         await query.answer("Только для администратора.", show_alert=True)
         return
     await query.answer("Запускаю загрузку Google Drive…")
-    await query.message.answer("⏳ Читаю и векторизую файлы из Google Drive…")
+    status_message = await query.message.answer("⏳ Оцениваю количество файлов в Google Drive…")
 
-    result = await run_drive_sync(gdrive, openrouter, settings)
+    last_status_text = status_message.text or ""
+
+    async def report_progress(update) -> None:
+        nonlocal last_status_text
+        if not update.message or update.message == last_status_text:
+            return
+        last_status_text = update.message
+        await status_message.edit_text(update.message)
+
+    result = await run_drive_sync(gdrive, openrouter, settings, progress=report_progress)
 
     if result.status == "ok":
         by_type = ", ".join(f"{k}: {v}" for k, v in result.per_type.items()) or "нет файлов"
         note = f"\n⚠️ Часть файлов пропущена: {result.error}" if result.error else ""
         hint = f"\n\n{result.hint}" if result.hint else ""
         await query.message.answer(
-            f"✅ Google Drive sync завершён. Файлов: {result.files_processed}, "
+            f"✅ Google Drive sync завершён. Найдено {result.files_discovered}, обработано {result.files_processed}, "
             f"чанков: {result.chunks_processed} (финансовых файлов {result.financial_files}). "
             f"{by_type}.{note}{hint}"
         )

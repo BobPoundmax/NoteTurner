@@ -54,6 +54,8 @@ async def search_chunks(
     *,
     embedding: list[float],
     include_financial: bool,
+    sources: list[str] | None = None,
+    record_types: list[str] | None = None,
     limit: int = 5,
 ) -> list[DocChunk]:
     """Return the closest chunks by cosine distance. Financial chunks are
@@ -61,6 +63,10 @@ async def search_chunks(
     stmt = select(DocChunk)
     if not include_financial:
         stmt = stmt.where(DocChunk.is_financial.is_(False))
+    if sources:
+        stmt = stmt.where(DocChunk.source.in_(sources))
+    if record_types:
+        stmt = stmt.where(DocChunk.record_type.in_(record_types))
     stmt = stmt.order_by(DocChunk.embedding.cosine_distance(embedding)).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())

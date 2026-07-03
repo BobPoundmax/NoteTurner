@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from pgvector.sqlalchemy import Vector
@@ -88,6 +89,22 @@ class SyncRun(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SyncCursor(Base):
+    __tablename__ = "sync_cursors"
+    __table_args__ = (UniqueConstraint("source", "record_type", name="uq_sync_cursors_source_type"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(50), index=True)
+    record_type: Mapped[str] = mapped_column(String(50), index=True)
+    cursor_kind: Mapped[str] = mapped_column(String(20))  # updated | created | snapshot
+    cursor_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_records_processed: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class DocChunk(Base):
