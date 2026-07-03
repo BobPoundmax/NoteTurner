@@ -30,6 +30,7 @@ class DriveSyncResult:
     financial_files: int = 0
     per_type: dict[str, int] = field(default_factory=dict)
     error: str | None = None
+    hint: str | None = None
 
 
 def chunk_text(text: str, *, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -124,9 +125,13 @@ async def run_drive_sync(
 
     financial_keywords = settings.financial_keyword_list
     errors: list[str] = []
+    discovery_hint: str | None = None
 
     try:
-        files = await gdrive.list_files()
+        discovery = await gdrive.list_files_detailed()
+        files = discovery.files
+        if not files:
+            discovery_hint = discovery.hint_when_empty
     except GoogleDriveError as exc:
         files = []
         errors.append(str(exc))
@@ -154,6 +159,8 @@ async def run_drive_sync(
         result.error = "; ".join(errors[:5])
         if result.chunks_processed == 0:
             result.status = "error"
+    elif discovery_hint:
+        result.hint = discovery_hint
 
     async with session_scope() as session:
         sync_run = await session.get(SyncRun, run_id)

@@ -4,6 +4,8 @@ from noteturner.integrations.gdrive import (
     MIME_FOLDER,
     MIME_SHEET,
     DriveFile,
+    DriveListResult,
+    DriveRootSummary,
     GoogleDriveClient,
     _rows_to_text,
 )
@@ -60,6 +62,7 @@ class _FakeListFiles:
         pageToken=None,
         supportsAllDrives=True,
         includeItemsFromAllDrives=True,
+        corpora=None,
     ):
         parent = q.split("'")[1]
         return _Exec({"files": self._tree["children"].get(parent, [])})
@@ -121,5 +124,28 @@ def test_list_files_multiple_roots() -> None:
     client = GoogleDriveClient(Settings(gdrive_folder_id="folder1,doc2"))
     client._drive = _FakeDriveWithTree(tree)
     client._sheets = _FakeSheets()
-    files = client._list_files_sync_locked(["folder1", "doc2"])
-    assert {f.id for f in files} == {"doc1", "doc2"}
+    result = client._list_files_detailed_sync_locked(["folder1", "doc2"])
+    assert {f.id for f in result.files} == {"doc1", "doc2"}
+
+
+def test_hint_when_empty_lists_checks() -> None:
+    result = DriveListResult(
+        files=[],
+        roots=[
+            DriveRootSummary(
+                root_id="x",
+                name="Virtuozy",
+                mime_type=MIME_FOLDER,
+                items_seen=12,
+                supported_files=0,
+            )
+        ],
+        skipped_by_mime={
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": 8,
+            "image/png": 4,
+        },
+    )
+    hint = result.hint_when_empty or ""
+    assert "GDRIVE_FOLDER_ID" in hint
+    assert "Virtuozy" in hint
+    assert "spreadsheetml" in hint

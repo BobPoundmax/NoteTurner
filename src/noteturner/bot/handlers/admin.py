@@ -344,10 +344,11 @@ async def cb_sync_drive(
     if result.status == "ok":
         by_type = ", ".join(f"{k}: {v}" for k, v in result.per_type.items()) or "нет файлов"
         note = f"\n⚠️ Часть файлов пропущена: {result.error}" if result.error else ""
+        hint = f"\n\n{result.hint}" if result.hint else ""
         await query.message.answer(
             f"✅ Google Drive sync завершён. Файлов: {result.files_processed}, "
             f"чанков: {result.chunks_processed} (финансовых файлов {result.financial_files}). "
-            f"{by_type}.{note}"
+            f"{by_type}.{note}{hint}"
         )
     else:
         await query.message.answer(f"❌ Ошибка Google Drive sync: {result.error}")
