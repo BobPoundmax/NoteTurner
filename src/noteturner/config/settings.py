@@ -25,6 +25,22 @@ class Settings(BaseSettings):
     # Embeddings (via OpenRouter /embeddings)
     embedding_model: str = "openai/text-embedding-3-small"
     embedding_dimensions: int = 1536
+    # How many chunk texts to embed per request. Kept small to bound peak memory
+    # during sync jobs on small instances (e.g. Render 256 MB).
+    embedding_batch_size: int = 32
+
+    # Sync execution
+    # When True, sync jobs are enqueued into the database and executed by a
+    # separate worker process (noteturner.worker) instead of running inline in
+    # the web process. This isolates heavy CRM/Drive processing from the bot so
+    # an out-of-memory sync cannot restart the webhook service.
+    sync_worker_enabled: bool = False
+    # Seconds between queue polls in the worker.
+    sync_worker_poll_interval: float = 5.0
+    # Upper bound on CRM records fetched per entity type in one sync run.
+    crm_max_records_per_type: int = 5000
+    # CRM API page size cap (overrides per-entity page size when smaller).
+    crm_sync_page_size: int = 100
 
     # Hollihop CRM
     hollihop_subdomain: str = ""

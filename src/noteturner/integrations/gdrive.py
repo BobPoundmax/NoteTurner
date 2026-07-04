@@ -347,8 +347,9 @@ class GoogleDriveClient:
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(data))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        return "\n".join(pages)
+        # Join lazily so we don't keep a separate per-page list alongside the
+        # final string for large PDFs.
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
 
     async def health_check(self) -> dict[str, Any]:
         started = datetime.now(timezone.utc)

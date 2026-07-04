@@ -56,3 +56,63 @@ projects:
                 value: openai/text-embedding-3-small
               - key: EMBEDDING_DIMENSIONS
                 value: "1536"
+              # Keep embedding batches small to bound peak memory on the 256 MB plan.
+              - key: EMBEDDING_BATCH_SIZE
+                value: "32"
+              - key: CRM_SYNC_PAGE_SIZE
+                value: "100"
+              # Offload heavy CRM/Drive sync to the worker service below so an
+              # out-of-memory sync can never restart the webhook bot.
+              # Set to "false" (and remove the worker service) to run everything
+              # inline in this single web service instead.
+              - key: SYNC_WORKER_ENABLED
+                value: "true"
+
+          # Background worker that drains the sync_jobs queue.
+          # NOTE: Render background workers require a paid instance type (there
+          # is no free worker plan). If you want to stay on the free tier, delete
+          # this service and set SYNC_WORKER_ENABLED to "false" on the web service.
+          - type: worker
+            name: noteturner-sync-worker
+            runtime: docker
+            plan: starter
+            dockerCommand: python -m noteturner.worker
+            envVars:
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: noteturner-db
+                  property: connectionString
+              - key: TELEGRAM_BOT_TOKEN
+                sync: false
+              - key: OPENROUTER_API_KEY
+                sync: false
+              - key: OPENROUTER_BASE_URL
+                value: https://openrouter.ai/api/v1
+              - key: OPENROUTER_TEST_MODEL
+                value: openai/gpt-5-nano
+              - key: HOLLIHOP_SUBDOMAIN
+                sync: false
+              - key: HOLLIHOP_AUTH_KEY
+                sync: false
+              - key: GDRIVE_FOLDER_ID
+                sync: false
+              - key: GOOGLE_PROJECT_ID
+                sync: false
+              - key: GOOGLE_SERVICE_ACCOUNT_EMAIL
+                sync: false
+              - key: GOOGLE_PRIVATE_KEY_ID
+                sync: false
+              - key: GOOGLE_PRIVATE_KEY
+                sync: false
+              - key: GOOGLE_CLIENT_ID
+                sync: false
+              - key: EMBEDDING_MODEL
+                value: openai/text-embedding-3-small
+              - key: EMBEDDING_DIMENSIONS
+                value: "1536"
+              - key: EMBEDDING_BATCH_SIZE
+                value: "32"
+              - key: CRM_SYNC_PAGE_SIZE
+                value: "100"
+              - key: SYNC_WORKER_ENABLED
+                value: "true"

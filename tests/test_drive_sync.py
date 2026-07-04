@@ -29,9 +29,15 @@ async def test_sync_file_embeds_and_stores(monkeypatch) -> None:
     async def fake_scope():
         yield object()
 
-    replace_mock = AsyncMock(return_value=0)
+    delete_mock = AsyncMock()
+
+    def _add(session, *, source, external_id, chunks):
+        return len(chunks)
+
+    add_mock = AsyncMock(side_effect=_add)
     monkeypatch.setattr(ds, "session_scope", fake_scope)
-    monkeypatch.setattr(ds, "replace_file_chunks", replace_mock)
+    monkeypatch.setattr(ds, "delete_source_chunks", delete_mock)
+    monkeypatch.setattr(ds, "add_chunks", add_mock)
 
     gdrive = AsyncMock()
     gdrive.extract_text = AsyncMock(return_value="слово " * 600)
@@ -47,12 +53,20 @@ async def test_sync_file_embeds_and_stores(monkeypatch) -> None:
     count = await ds._sync_file(gdrive, openrouter, file, financial_keywords=[])
 
     assert count > 0
-    replace_mock.assert_awaited_once()
-    kwargs = replace_mock.await_args.kwargs
-    assert kwargs["source"] == "gdrive"
-    assert kwargs["external_id"] == "f1"
-    assert len(kwargs["chunks"]) == count
-    assert kwargs["chunks"][0].record_type == "doc"
+    delete_mock.assert_awaited_once()
+    add_mock.assert_awaited()
+
+    # Old chunks are cleared before any new batch is written.
+    all_calls = add_mock.await_args_list
+    stored = sum(len(call.kwargs["chunks"]) for call in all_calls)
+    assert stored == count
+    assert all_calls[0].kwargs["source"] == "gdrive"
+    assert all_calls[0].kwargs["external_id"] == "f1"
+    assert all_calls[0].kwargs["chunks"][0].record_type == "doc"
+
+    # chunk_index should be contiguous across batches.
+    indexes = [chunk.chunk_index for call in all_calls for chunk in call.kwargs["chunks"]]
+    assert indexes == list(range(count))
 
 
 async def test_run_drive_sync_reports_count_and_processing(monkeypatch) -> None:

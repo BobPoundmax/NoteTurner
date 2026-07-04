@@ -2,10 +2,14 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from noteturner.config.settings import Settings
+from noteturner.config.settings import Settings, get_settings
 from noteturner.db.models import SyncRun
 from noteturner.db.repositories.sync import create_sync_run, finish_sync_run
-from noteturner.db.repositories.vectors import ChunkInput, replace_file_chunks
+from noteturner.db.repositories.vectors import (
+    ChunkInput,
+    add_chunks,
+    delete_source_chunks,
+)
 from noteturner.db.session import session_scope
 from noteturner.integrations.gdrive import (
     RECORD_TYPE_BY_MIME,
@@ -101,12 +105,11 @@ async def _report_progress(
         await progress(update)
 
 
-async def _embed_all(openrouter: OpenRouterClient, texts: list[str]) -> list[list[float]]:
-    vectors: list[list[float]] = []
-    for i in range(0, len(texts), EMBED_BATCH):
-        batch = texts[i : i + EMBED_BATCH]
-        vectors.extend(await openrouter.embed(batch))
-    return vectors
+def _embed_batch_size() -> int:
+    try:
+        return max(1, get_settings().embedding_batch_size)
+    except Exception:  # noqa: BLE001
+        return EMBED_BATCH
 
 
 async def _sync_file(
@@ -118,29 +121,41 @@ async def _sync_file(
 ) -> int:
     text = await gdrive.extract_text(file)
     pieces = chunk_text(text)
+    # Release the (potentially large) full-document string before embedding.
+    del text
     if not pieces:
         return 0
 
-    embeddings = await _embed_all(openrouter, pieces)
     financial = is_financial_name(file.name, financial_keywords)
-    chunks = [
-        ChunkInput(
-            content=piece,
-            embedding=embedding,
-            chunk_index=index,
-            title=file.name,
-            record_type=file.record_type,
-            is_financial=financial,
-            payload={"file_id": file.id, "mime_type": file.mime_type},
-        )
-        for index, (piece, embedding) in enumerate(zip(pieces, embeddings))
-    ]
+    payload = {"file_id": file.id, "mime_type": file.mime_type}
+    batch_size = _embed_batch_size()
 
+    # Delete the old chunks once, then embed + insert in small batches so we
+    # never hold every embedding for a big file in memory at the same time.
     async with session_scope() as session:
-        await replace_file_chunks(
-            session, source=SOURCE, external_id=file.id, chunks=chunks
-        )
-    return len(chunks)
+        await delete_source_chunks(session, source=SOURCE, external_id=file.id)
+
+    stored = 0
+    for start in range(0, len(pieces), batch_size):
+        batch = pieces[start : start + batch_size]
+        embeddings = await openrouter.embed(batch)
+        chunks = [
+            ChunkInput(
+                content=piece,
+                embedding=embedding,
+                chunk_index=start + offset,
+                title=file.name,
+                record_type=file.record_type,
+                is_financial=financial,
+                payload=payload,
+            )
+            for offset, (piece, embedding) in enumerate(zip(batch, embeddings))
+        ]
+        async with session_scope() as session:
+            stored += await add_chunks(
+                session, source=SOURCE, external_id=file.id, chunks=chunks
+            )
+    return stored
 
 
 async def run_drive_sync(

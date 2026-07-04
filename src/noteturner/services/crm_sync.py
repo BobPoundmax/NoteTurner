@@ -14,6 +14,7 @@ from noteturner.db.repositories.sync import (
     upsert_raw_record,
     upsert_sync_cursor,
 )
+from noteturner.config.settings import get_settings
 from noteturner.db.repositories.vectors import ChunkInput, replace_file_chunks
 from noteturner.db.session import session_scope
 from noteturner.integrations.hollihop import HollihopClient, HollihopError
@@ -25,6 +26,33 @@ SOURCE = "hollihop"
 EMBED_BATCH = 64
 DEFAULT_PAGE_SIZE = 200
 MAX_RECORDS_PER_TYPE = 5000
+
+
+def _embed_batch_size() -> int:
+    """Embedding batch size, read from settings so it can be tuned per deploy."""
+    try:
+        return max(1, get_settings().embedding_batch_size)
+    except Exception:  # noqa: BLE001 - fall back to a safe default if settings fail
+        return EMBED_BATCH
+
+
+def _page_size(config: "EntitySyncConfig") -> int:
+    """Effective API page size, capped by the global sync page-size setting."""
+    try:
+        cap = get_settings().crm_sync_page_size
+    except Exception:  # noqa: BLE001
+        return config.page_size
+    if cap and cap > 0:
+        return min(config.page_size, cap)
+    return config.page_size
+
+
+def _max_records_per_type() -> int:
+    try:
+        value = get_settings().crm_max_records_per_type
+    except Exception:  # noqa: BLE001
+        return MAX_RECORDS_PER_TYPE
+    return value if value and value > 0 else MAX_RECORDS_PER_TYPE
 SCHEDULE_ITEM_RECORD_TYPE = "schedule_item"
 SCHEDULE_DAY_RECORD_TYPE = "schedule_day"
 GROUP_PAYER_RECORD_TYPE = "group_payer"
@@ -943,103 +971,6 @@ def _next_cursor_value(
     return cursor_value, meta
 
 
-async def _sync_entity(
-    hollihop: HollihopClient,
-    *,
-    config: EntitySyncConfig,
-    progress: ProgressReporter | None = None,
-) -> tuple[list[SyncedRecord], str | None, dict[str, Any], int]:
-    records: list[SyncedRecord] = []
-    skip = 0
-    processed = 0
-    page_index = 0
-
-    async with session_scope() as session:
-        cursor = await get_sync_cursor(session, source=SOURCE, record_type=config.record_type)
-        cursor_value = cursor.cursor_value if cursor is not None else None
-
-    request_params, request_meta = _build_request_params(config, cursor_value)
-    next_cursor, next_meta = cursor_value, {"last_synced_at": _current_utc_iso(), **request_meta}
-    logger.info(
-        "CRM sync entity started record_type=%s endpoint=%s cursor_kind=%s cursor_value=%s page_size=%s",
-        config.record_type,
-        config.function_name,
-        config.cursor_kind,
-        cursor_value or "-",
-        config.page_size,
-    )
-
-    async with session_scope() as session:
-        while processed < MAX_RECORDS_PER_TYPE:
-            data = await hollihop.call(
-                config.function_name,
-                **request_params,
-                take=config.page_size,
-                skip=skip,
-            )
-            page_index += 1
-            items = data.get(config.result_key) or []
-            page_count = len(items)
-            next_cursor, next_meta = _next_cursor_value(
-                config,
-                previous=next_cursor,
-                data=data,
-                items=items,
-                request_meta=request_meta,
-            )
-            if not items:
-                logger.info(
-                    "CRM sync page fetched record_type=%s skip=%s fetched=0 processed_total=%s",
-                    config.record_type,
-                    skip,
-                    processed,
-                )
-                break
-
-            for item in items:
-                synced = SERIALIZERS[config.record_type](config, item, next_meta)
-                await upsert_raw_record(
-                    session,
-                    source=SOURCE,
-                    record_type=config.record_type,
-                    external_id=synced.external_id,
-                    content=synced.content,
-                    payload=item,
-                    is_financial=config.is_financial,
-                )
-                records.append(synced)
-                processed += 1
-                if processed >= MAX_RECORDS_PER_TYPE:
-                    break
-
-            await session.commit()
-            await _report_progress(
-                progress,
-                CrmSyncProgress(
-                    stage="page_fetched",
-                    record_type=config.record_type,
-                    records_processed=processed,
-                    page_index=page_index,
-                    message=(
-                        f"⏳ CRM: загружено {processed} записей типа {config.record_type} "
-                        f"({page_index} стр., последняя +{page_count})."
-                    ),
-                ),
-            )
-            logger.info(
-                "CRM sync page fetched record_type=%s skip=%s fetched=%s processed_total=%s",
-                config.record_type,
-                skip,
-                page_count,
-                processed,
-            )
-            if len(items) < config.page_size or processed >= MAX_RECORDS_PER_TYPE:
-                break
-            skip += config.page_size
-
-    return records, next_cursor, next_meta, processed
-
-
 async def _embed_all(
     openrouter: OpenRouterClient,
     texts: list[str],
@@ -1047,50 +978,29 @@ async def _embed_all(
     on_batch: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> list[list[float]]:
     vectors: list[list[float]] = []
-    for i in range(0, len(texts), EMBED_BATCH):
-        batch = texts[i : i + EMBED_BATCH]
+    batch_size = _embed_batch_size()
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
         vectors.extend(await openrouter.embed(batch))
         if on_batch is not None:
             await on_batch(min(i + len(batch), len(texts)), len(texts))
     return vectors
 
 
-async def _vectorize_records(
+async def _flush_vector_group(
     openrouter: OpenRouterClient,
-    records: list[SyncedRecord],
-    *,
-    progress: ProgressReporter | None = None,
-    record_type: str | None = None,
-    records_processed: int = 0,
-    chunks_processed: int = 0,
+    group: list[SyncedRecord],
 ) -> int:
-    if not records:
+    """Embed and persist one small group of records, then let it be freed."""
+    texts = [chunk.content for record in group for chunk in record.vector_chunks]
+    if not texts:
         return 0
 
-    texts = [chunk.content for record in records for chunk in record.vector_chunks]
-
-    async def report_batch(completed_chunks: int, total_chunks: int) -> None:
-        await _report_progress(
-            progress,
-            CrmSyncProgress(
-                stage="vectorizing_batch",
-                record_type=record_type,
-                records_processed=records_processed,
-                chunks_processed=chunks_processed + completed_chunks,
-                message=(
-                    f"⏳ CRM: векторизую {record_type or 'данные'} - "
-                    f"готово {completed_chunks}/{total_chunks} чанков "
-                    f"(всего записей {records_processed})."
-                ),
-            ),
-        )
-
-    embeddings = await _embed_all(openrouter, texts, on_batch=report_batch if progress is not None else None)
+    embeddings = await _embed_all(openrouter, texts)
     stored = 0
     position = 0
-
     async with session_scope() as session:
-        for record in records:
+        for record in group:
             chunk_inputs: list[ChunkInput] = []
             for chunk_index, chunk in enumerate(record.vector_chunks):
                 chunk_inputs.append(
@@ -1113,6 +1023,198 @@ async def _vectorize_records(
             )
             stored += len(chunk_inputs)
     return stored
+
+
+async def _vectorize_records(
+    openrouter: OpenRouterClient,
+    records: list[SyncedRecord],
+    *,
+    progress: ProgressReporter | None = None,
+    record_type: str | None = None,
+    records_processed: int = 0,
+    chunks_processed: int = 0,
+) -> int:
+    """Embed records in small groups so peak memory stays bounded.
+
+    Instead of materializing every chunk text and every embedding for the whole
+    set at once, records are accumulated into groups roughly the size of the
+    embedding batch. Each group is embedded, written, and then released before
+    the next group is built.
+    """
+    if not records:
+        return 0
+
+    batch_size = _embed_batch_size()
+    total_chunks = sum(len(record.vector_chunks) for record in records)
+    stored = 0
+    completed_chunks = 0
+
+    group: list[SyncedRecord] = []
+    group_chunk_count = 0
+
+    async def flush() -> None:
+        nonlocal stored, completed_chunks, group, group_chunk_count
+        if not group:
+            return
+        stored += await _flush_vector_group(openrouter, group)
+        completed_chunks += group_chunk_count
+        if progress is not None:
+            await _report_progress(
+                progress,
+                CrmSyncProgress(
+                    stage="vectorizing_batch",
+                    record_type=record_type,
+                    records_processed=records_processed,
+                    chunks_processed=chunks_processed + completed_chunks,
+                    message=(
+                        f"⏳ CRM: векторизую {record_type or 'данные'} - "
+                        f"готово {completed_chunks}/{total_chunks} чанков "
+                        f"(всего записей {records_processed})."
+                    ),
+                ),
+            )
+        group = []
+        group_chunk_count = 0
+
+    for record in records:
+        group.append(record)
+        group_chunk_count += len(record.vector_chunks)
+        if group_chunk_count >= batch_size:
+            await flush()
+    await flush()
+    return stored
+
+
+async def _sync_entity(
+    hollihop: HollihopClient,
+    *,
+    config: EntitySyncConfig,
+    openrouter: OpenRouterClient | None = None,
+    vectorization_enabled: bool = False,
+    progress: ProgressReporter | None = None,
+    records_processed_base: int = 0,
+    chunks_processed_base: int = 0,
+) -> tuple[str | None, dict[str, Any], int, int]:
+    """Stream one entity type page-by-page.
+
+    Each page is upserted into ``raw_records`` and (optionally) vectorized
+    immediately, then discarded. This avoids holding the whole entity (records
+    and embeddings) in memory at once, which is the main OOM risk on small
+    instances.
+
+    Returns ``(next_cursor, next_meta, processed, chunks_added)``.
+    """
+    skip = 0
+    processed = 0
+    chunks_added = 0
+    page_index = 0
+    page_size = _page_size(config)
+    max_records = _max_records_per_type()
+
+    async with session_scope() as session:
+        cursor = await get_sync_cursor(session, source=SOURCE, record_type=config.record_type)
+        cursor_value = cursor.cursor_value if cursor is not None else None
+
+    request_params, request_meta = _build_request_params(config, cursor_value)
+    next_cursor, next_meta = cursor_value, {"last_synced_at": _current_utc_iso(), **request_meta}
+    logger.info(
+        "CRM sync entity started record_type=%s endpoint=%s cursor_kind=%s cursor_value=%s "
+        "page_size=%s embed_batch=%s max_records=%s",
+        config.record_type,
+        config.function_name,
+        config.cursor_kind,
+        cursor_value or "-",
+        page_size,
+        _embed_batch_size(),
+        max_records,
+    )
+
+    while processed < max_records:
+        data = await hollihop.call(
+            config.function_name,
+            **request_params,
+            take=page_size,
+            skip=skip,
+        )
+        page_index += 1
+        items = data.get(config.result_key) or []
+        page_count = len(items)
+        next_cursor, next_meta = _next_cursor_value(
+            config,
+            previous=next_cursor,
+            data=data,
+            items=items,
+            request_meta=request_meta,
+        )
+        if not items:
+            logger.info(
+                "CRM sync page fetched record_type=%s skip=%s fetched=0 processed_total=%s",
+                config.record_type,
+                skip,
+                processed,
+            )
+            break
+
+        # Serialize + upsert this page's raw records in a short-lived session so
+        # the SQLAlchemy identity map does not grow across the whole entity.
+        page_records: list[SyncedRecord] = []
+        async with session_scope() as session:
+            for item in items:
+                synced = SERIALIZERS[config.record_type](config, item, next_meta)
+                await upsert_raw_record(
+                    session,
+                    source=SOURCE,
+                    record_type=config.record_type,
+                    external_id=synced.external_id,
+                    content=synced.content,
+                    payload=item,
+                    is_financial=config.is_financial,
+                )
+                page_records.append(synced)
+                processed += 1
+                if processed >= max_records:
+                    break
+            await session.commit()
+
+        await _report_progress(
+            progress,
+            CrmSyncProgress(
+                stage="page_fetched",
+                record_type=config.record_type,
+                records_processed=records_processed_base + processed,
+                chunks_processed=chunks_processed_base + chunks_added,
+                page_index=page_index,
+                message=(
+                    f"⏳ CRM: загружено {processed} записей типа {config.record_type} "
+                    f"({page_index} стр., последняя +{page_count})."
+                ),
+            ),
+        )
+        logger.info(
+            "CRM sync page fetched record_type=%s skip=%s fetched=%s processed_total=%s",
+            config.record_type,
+            skip,
+            page_count,
+            processed,
+        )
+
+        # Vectorize just this page and release it before fetching the next one.
+        if vectorization_enabled and openrouter is not None:
+            chunks_added += await _vectorize_records(
+                openrouter,
+                page_records,
+                progress=progress,
+                record_type=config.record_type,
+                records_processed=records_processed_base + processed,
+                chunks_processed=chunks_processed_base + chunks_added,
+            )
+        page_records.clear()
+
+        if page_count < page_size or processed >= max_records:
+            break
+        skip += page_size
+
+    return next_cursor, next_meta, processed, chunks_added
 
 
 async def run_hollihop_sync(
@@ -1164,90 +1266,37 @@ async def run_hollihop_sync(
                     message=f"⏳ CRM: начинаю выгрузку типа {config.record_type}.",
                 ),
             )
-            records, next_cursor, next_meta, processed = await _sync_entity(
-                hollihop,
-                config=config,
-                progress=progress,
-            )
+            try:
+                next_cursor, next_meta, processed, chunks_added = await _sync_entity(
+                    hollihop,
+                    config=config,
+                    openrouter=openrouter if vectorization_enabled else None,
+                    vectorization_enabled=vectorization_enabled,
+                    progress=progress,
+                    records_processed_base=result.records_processed,
+                    chunks_processed_base=result.chunks_processed,
+                )
+            except OpenRouterError as exc:
+                # Vectorization failed mid-stream: raw records for processed pages
+                # are already committed, but we skip advancing the cursor so the
+                # entity is retried on the next run.
+                logger.warning("CRM vectorization failed for %s: %s", config.record_type, exc)
+                errors.append(f"{config.record_type}: vectorization failed ({exc})")
+                continue
+
             result.per_type[config.record_type] = processed
             result.records_processed += processed
+            result.chunks_processed += chunks_added
             if config.is_financial:
                 result.financial_processed += processed
-            await _report_progress(
-                progress,
-                CrmSyncProgress(
-                    stage="entity_fetched",
-                    record_type=config.record_type,
-                    records_processed=result.records_processed,
-                    chunks_processed=result.chunks_processed,
-                    message=(
-                        f"⏳ CRM: тип {config.record_type} загружен, записей {processed}. "
-                        f"Всего записей {result.records_processed}."
-                    ),
-                ),
-            )
             logger.info(
-                "CRM sync phase fetched record_type=%s records=%s financial=%s next_cursor=%s",
+                "CRM sync phase fetched record_type=%s records=%s chunks=%s financial=%s next_cursor=%s",
                 config.record_type,
                 processed,
+                chunks_added,
                 config.is_financial,
                 next_cursor or "-",
             )
-
-            if vectorization_enabled:
-                try:
-                    chunk_candidates = sum(len(record.vector_chunks) for record in records)
-                    await _report_progress(
-                        progress,
-                        CrmSyncProgress(
-                            stage="vectorizing",
-                            record_type=config.record_type,
-                            records_processed=result.records_processed,
-                            chunks_processed=result.chunks_processed,
-                            message=(
-                                f"⏳ CRM: векторизую {len(records)} записей типа "
-                                f"{config.record_type} ({chunk_candidates} чанков-кандидатов)."
-                            ),
-                        ),
-                    )
-                    logger.info(
-                        "CRM vectorization started record_type=%s records=%s chunk_candidates=%s",
-                        config.record_type,
-                        len(records),
-                        chunk_candidates,
-                    )
-                    chunks_added = await _vectorize_records(
-                        openrouter,
-                        records,
-                        progress=progress,
-                        record_type=config.record_type,
-                        records_processed=result.records_processed,
-                        chunks_processed=result.chunks_processed,
-                    )
-                    result.chunks_processed += chunks_added
-                    await _report_progress(
-                        progress,
-                        CrmSyncProgress(
-                            stage="vectorized",
-                            record_type=config.record_type,
-                            records_processed=result.records_processed,
-                            chunks_processed=result.chunks_processed,
-                            message=(
-                                f"⏳ CRM: готово {config.record_type}, добавлено {chunks_added} чанков. "
-                                f"Всего чанков {result.chunks_processed}."
-                            ),
-                        ),
-                    )
-                    logger.info(
-                        "CRM vectorization finished record_type=%s chunks_added=%s chunks_total=%s",
-                        config.record_type,
-                        chunks_added,
-                        result.chunks_processed,
-                    )
-                except OpenRouterError as exc:
-                    logger.warning("CRM vectorization failed for %s: %s", config.record_type, exc)
-                    errors.append(f"{config.record_type}: vectorization failed ({exc})")
-                    continue
 
             async with session_scope() as session:
                 await upsert_sync_cursor(

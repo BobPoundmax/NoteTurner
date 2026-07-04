@@ -159,8 +159,10 @@ async def _render_sources_status(
         else {"status": "skipped", "error": "HOLLIHOP_SUBDOMAIN / HOLLIHOP_AUTH_KEY not set"}
     )
 
+    # Use the lightweight health probe instead of a full recursive Drive listing:
+    # rendering source status should not walk every folder/file (memory + latency).
     drive_task = (
-        gdrive.list_files_detailed()
+        gdrive.health_check()
         if gdrive.is_configured
         else {"status": "skipped", "error": "GDRIVE_FOLDER_ID or Google service account env vars not set"}
     )

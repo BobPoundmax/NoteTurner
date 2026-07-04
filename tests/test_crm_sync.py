@@ -187,13 +187,14 @@ async def test_sync_entity_reports_page_progress(monkeypatch) -> None:
     async def progress(update) -> None:
         progress_updates.append(update)
 
-    _records, _next_cursor, _next_meta, processed = await cs._sync_entity(
+    _next_cursor, _next_meta, processed, chunks_added = await cs._sync_entity(
         hollihop,
         config=cs.ENTITY_CONFIGS["lead"],
         progress=progress,
     )
 
     assert processed == 2
+    assert chunks_added == 0
     page_update = next(update for update in progress_updates if update.stage == "page_fetched")
     assert page_update.record_type == "lead"
     assert page_update.records_processed == 2
@@ -214,29 +215,20 @@ async def test_run_hollihop_sync_reports_progress(monkeypatch) -> None:
     monkeypatch.setattr(cs, "create_sync_run", AsyncMock(return_value=SimpleNamespace(id=7)))
     monkeypatch.setattr(cs, "finish_sync_run", AsyncMock())
     monkeypatch.setattr(cs, "upsert_sync_cursor", AsyncMock())
+    # _sync_entity now streams pages and vectorizes inline, returning only
+    # (next_cursor, next_meta, processed, chunks_added).
     monkeypatch.setattr(
         cs,
         "_sync_entity",
         AsyncMock(
             return_value=(
-                [
-                    SyncedRecord(
-                        external_id="1",
-                        record_type="lead",
-                        title="CRM lead #1",
-                        content="lead 1",
-                        payload=None,
-                        is_financial=False,
-                        vector_chunks=[VectorChunkSpec(content="lead 1"), VectorChunkSpec(content="lead 1 details")],
-                    )
-                ],
                 "2026-01-01T00:00:00",
                 {"last_synced_at": "2026-01-01T00:00:00"},
                 1,
+                2,
             )
         ),
     )
-    monkeypatch.setattr(cs, "_vectorize_records", AsyncMock(return_value=2))
 
     hollihop = AsyncMock()
     hollihop.is_configured = True
@@ -261,8 +253,5 @@ async def test_run_hollihop_sync_reports_progress(monkeypatch) -> None:
     assert result.chunks_processed == 2
     assert [update.stage for update in progress_updates] == [
         "entity_started",
-        "entity_fetched",
-        "vectorizing",
-        "vectorized",
         "entity_finished",
     ]

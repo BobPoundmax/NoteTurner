@@ -55,6 +55,48 @@ async def replace_file_chunks(
     return len(chunks)
 
 
+async def delete_source_chunks(
+    session: AsyncSession,
+    *,
+    source: str,
+    external_id: str,
+) -> None:
+    """Delete all chunks for a source file (used before streaming a fresh set)."""
+    await session.execute(
+        delete(DocChunk).where(
+            DocChunk.source == source,
+            DocChunk.external_id == external_id,
+        )
+    )
+    await session.commit()
+
+
+async def add_chunks(
+    session: AsyncSession,
+    *,
+    source: str,
+    external_id: str,
+    chunks: list[ChunkInput],
+) -> int:
+    """Append a batch of chunks without deleting existing ones."""
+    for chunk in chunks:
+        session.add(
+            DocChunk(
+                source=source,
+                external_id=external_id,
+                record_type=chunk.record_type,
+                title=chunk.title,
+                chunk_index=chunk.chunk_index,
+                content=chunk.content,
+                embedding=chunk.embedding,
+                is_financial=chunk.is_financial,
+                payload=chunk.payload,
+            )
+        )
+    await session.commit()
+    return len(chunks)
+
+
 async def search_chunks(
     session: AsyncSession,
     *,

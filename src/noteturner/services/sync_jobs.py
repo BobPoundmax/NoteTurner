@@ -6,11 +6,18 @@ from typing import Any
 
 from aiogram import Bot
 
-from noteturner.db.models import SyncRun
+from noteturner.config.settings import Settings, get_settings
+from noteturner.db.models import SyncJob, SyncRun
+from noteturner.db.repositories.jobs import (
+    enqueue_sync_job,
+    finish_job,
+    get_active_job,
+    record_types_tuple,
+)
+from noteturner.db.session import session_scope
 from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
 from noteturner.integrations.openrouter import OpenRouterClient
-from noteturner.config.settings import Settings
 from noteturner.services.crm_sync import CrmSyncProgress, CrmSyncResult, run_hollihop_sync
 from noteturner.services.drive_sync import DriveSyncProgress, DriveSyncResult, run_drive_sync
 
@@ -175,8 +182,9 @@ async def _run_hollihop_sync_job(
     *,
     label: str,
     record_types: tuple[str, ...] | None,
-) -> None:
+) -> CrmSyncResult | None:
     ticker_task: asyncio.Task[None] | None = None
+    result: CrmSyncResult | None = None
 
     async def report_progress(update: CrmSyncProgress) -> None:
         previous_stage = job.last_progress.stage if job.last_progress is not None else None
@@ -227,6 +235,8 @@ async def _run_hollihop_sync_job(
             if existing is not None and existing.task is current_task:
                 _jobs.pop(HOLLIHOP_SOURCE, None)
 
+    return result
+
 
 async def _run_drive_sync_job(
     job: RunningSyncJob,
@@ -236,8 +246,9 @@ async def _run_drive_sync_job(
     settings: Settings,
     *,
     label: str,
-) -> None:
+) -> DriveSyncResult | None:
     ticker_task: asyncio.Task[None] | None = None
+    result: DriveSyncResult | None = None
 
     async def report_progress(update: DriveSyncProgress) -> None:
         previous_stage = getattr(job.last_progress, "stage", None)
@@ -283,6 +294,8 @@ async def _run_drive_sync_job(
             if existing is not None and existing.task is current_task:
                 _jobs.pop(GDRIVE_SOURCE, None)
 
+    return result
+
 
 def get_running_hollihop_sync_job() -> RunningSyncJob | None:
     job = _jobs.get(HOLLIHOP_SOURCE)
@@ -304,6 +317,50 @@ def get_running_drive_sync_job() -> RunningSyncJob | None:
     return job
 
 
+def _running_job_from_row(row: SyncJob) -> RunningSyncJob:
+    return RunningSyncJob(
+        source=row.source,
+        label=row.label,
+        started_at=row.started_at or row.requested_at or datetime.now(timezone.utc),
+        chat_id=row.chat_id,
+        status_message_id=row.status_message_id,
+    )
+
+
+async def _enqueue_sync_job(
+    bot: Bot,
+    chat_id: int,
+    *,
+    source: str,
+    label: str,
+    record_types: tuple[str, ...] | None,
+    queued_text: str,
+) -> tuple[bool, RunningSyncJob]:
+    """Enqueue a job for the worker process instead of running it inline."""
+    async with session_scope() as session:
+        existing = await get_active_job(session, source=source)
+        if existing is not None:
+            return False, _running_job_from_row(existing)
+
+    status_message_id: int | None = None
+    try:
+        message = await bot.send_message(chat_id, queued_text)
+        status_message_id = message.message_id
+    except Exception:
+        logger.exception("Failed to send queued status message")
+
+    async with session_scope() as session:
+        row = await enqueue_sync_job(
+            session,
+            source=source,
+            label=label,
+            chat_id=chat_id,
+            status_message_id=status_message_id,
+            record_types=record_types,
+        )
+        return True, _running_job_from_row(row)
+
+
 async def ensure_hollihop_sync_job(
     bot: Bot,
     chat_id: int,
@@ -313,6 +370,19 @@ async def ensure_hollihop_sync_job(
     label: str,
     record_types: tuple[str, ...] | None = None,
 ) -> tuple[bool, RunningSyncJob]:
+    if get_settings().sync_worker_enabled:
+        return await _enqueue_sync_job(
+            bot,
+            chat_id,
+            source=HOLLIHOP_SOURCE,
+            label=label,
+            record_types=record_types,
+            queued_text=(
+                f"🗂️ Выгрузка {label} из Hollihop поставлена в очередь. "
+                "Её обработает отдельный воркер, статус буду обновлять здесь."
+            ),
+        )
+
     async with _jobs_lock:
         existing = get_running_hollihop_sync_job()
         if existing is not None:
@@ -349,6 +419,19 @@ async def ensure_drive_sync_job(
     *,
     label: str = "Google Drive",
 ) -> tuple[bool, RunningSyncJob]:
+    if get_settings().sync_worker_enabled:
+        return await _enqueue_sync_job(
+            bot,
+            chat_id,
+            source=GDRIVE_SOURCE,
+            label=label,
+            record_types=None,
+            queued_text=(
+                f"🗂️ Загрузка {label} поставлена в очередь. "
+                "Её обработает отдельный воркер, статус буду обновлять здесь."
+            ),
+        )
+
     async with _jobs_lock:
         existing = get_running_drive_sync_job()
         if existing is not None:
@@ -374,3 +457,65 @@ async def ensure_drive_sync_job(
         job.task = task
         _jobs[GDRIVE_SOURCE] = job
         return True, job
+
+
+async def execute_sync_job(
+    row: SyncJob,
+    bot: Bot,
+    hollihop: HollihopClient,
+    openrouter: OpenRouterClient | None,
+    gdrive: GoogleDriveClient,
+    settings: Settings,
+) -> None:
+    """Run a claimed queue job in the worker process and finalize its DB row.
+
+    Reuses the same status-reporting runners as the in-process path so the
+    Telegram status message (created when the job was enqueued) is edited in
+    place.
+    """
+    job = _running_job_from_row(row)
+    status = "error"
+    error_log: str | None = None
+
+    try:
+        if row.source == HOLLIHOP_SOURCE:
+            result = await _run_hollihop_sync_job(
+                job,
+                bot,
+                hollihop,
+                openrouter,
+                label=row.label,
+                record_types=record_types_tuple(row),
+            )
+            if result is None:
+                status, error_log = "error", "sync crashed (see worker logs)"
+            else:
+                status = "done" if result.status == "ok" else "error"
+                error_log = result.error
+        elif row.source == GDRIVE_SOURCE:
+            if openrouter is None:
+                status, error_log = "error", "OpenRouter is not configured"
+            else:
+                result = await _run_drive_sync_job(
+                    job,
+                    bot,
+                    gdrive,
+                    openrouter,
+                    settings,
+                    label=row.label,
+                )
+                if result is None:
+                    status, error_log = "error", "sync crashed (see worker logs)"
+                else:
+                    status = "done" if result.status == "ok" else "error"
+                    error_log = result.error
+        else:
+            status, error_log = "error", f"unknown sync source {row.source}"
+    except Exception as exc:  # noqa: BLE001 - never let one job kill the worker loop
+        logger.exception("Worker sync job %s (%s) crashed", row.id, row.source)
+        status, error_log = "error", str(exc)
+    finally:
+        async with session_scope() as session:
+            db_job = await session.get(SyncJob, row.id)
+            if db_job is not None:
+                await finish_job(session, db_job, status=status, error_log=error_log)
