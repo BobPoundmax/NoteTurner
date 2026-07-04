@@ -9,6 +9,7 @@ from noteturner.bot.dispatcher import create_bot, create_dispatcher, remove_webh
 from noteturner.bot.middlewares.inject import InjectDependenciesMiddleware
 from noteturner.config.settings import Settings, get_settings
 from noteturner.db.session import close_db, init_db
+from noteturner.debug_runtime import agent_debug_log
 from noteturner.health.checker import run_health_checks
 from noteturner.integrations.gdrive import GoogleDriveClient
 from noteturner.integrations.hollihop import HollihopClient
@@ -107,6 +108,25 @@ async def telegram_webhook(secret: str, request: Request) -> Response:
         raise HTTPException(status_code=503, detail="Bot not configured")
 
     payload = await request.json()
+    message = payload.get("message") or payload.get("edited_message") or {}
+    chat = message.get("chat") or {}
+    from_user = message.get("from") or {}
+    # #region agent log
+    agent_debug_log(
+        location="src/noteturner/main.py:113",
+        message="Telegram webhook update received",
+        data={
+            "update_id": payload.get("update_id"),
+            "message_present": bool(message),
+            "chat_id": chat.get("id"),
+            "chat_type": chat.get("type"),
+            "from_user_id": from_user.get("id"),
+            "text_len": len(message.get("text") or ""),
+        },
+        hypothesis_id="A",
+        run_id="user-repro",
+    )
+    # #endregion
     update = Update.model_validate(payload, context={"bot": bot})
     await dp.feed_update(bot, update)
     return Response(status_code=200)

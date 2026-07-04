@@ -7,6 +7,7 @@ from noteturner.bot.access import is_admin
 from noteturner.bot.filters import ChatRoleFilter
 from noteturner.bot.utils import is_bot_mentioned, is_group_chat, strip_bot_mention
 from noteturner.config.settings import Settings
+from noteturner.debug_runtime import agent_debug_log
 from noteturner.db.repositories.sync import recent_sync_runs
 from noteturner.db.repositories.query_logs import add_query_log
 from noteturner.db.session import session_scope
@@ -169,7 +170,23 @@ async def handle_assistant_message(
     hollihop: HollihopClient,
 ) -> None:
     bot_info = await message.bot.get_me()
-    if is_group_chat(message) and not is_bot_mentioned(message, bot_info.username):
+    mentioned = is_bot_mentioned(message, bot_info.username)
+    if is_group_chat(message) and not mentioned:
+        # #region agent log
+        agent_debug_log(
+            location="src/noteturner/bot/handlers/assistant.py:176",
+            message="Assistant ignored group message without mention",
+            data={
+                "chat_id": message.chat.id,
+                "chat_type": message.chat.type,
+                "from_user_id": message.from_user.id if message.from_user else None,
+                "text_len": len(message.text or ""),
+                "mentioned": mentioned,
+            },
+            hypothesis_id="C",
+            run_id="user-repro",
+        )
+        # #endregion
         return
 
     user_text = strip_bot_mention(message.text or "", bot_info.username)
@@ -179,6 +196,22 @@ async def handle_assistant_message(
 
     user_id = message.from_user.id if message.from_user else None
     admin = await is_admin(user_id, settings)
+    # #region agent log
+    agent_debug_log(
+        location="src/noteturner/bot/handlers/assistant.py:200",
+        message="Assistant handler accepted message",
+        data={
+            "chat_id": message.chat.id,
+            "chat_type": message.chat.type,
+            "from_user_id": user_id,
+            "text_len": len(user_text),
+            "mentioned": mentioned,
+            "is_admin": admin,
+        },
+        hypothesis_id="C",
+        run_id="user-repro",
+    )
+    # #endregion
 
     await message.bot.send_chat_action(message.chat.id, "typing")
 
@@ -230,10 +263,49 @@ async def handle_assistant_message(
     retriever = VectorRetriever(openrouter)
 
     try:
+        # #region agent log
+        agent_debug_log(
+            location="src/noteturner/bot/handlers/assistant.py:258",
+            message="Assistant calling answerer",
+            data={
+                "chat_id": message.chat.id,
+                "text_len": len(user_text),
+                "is_admin": admin,
+            },
+            hypothesis_id="D",
+            run_id="user-repro",
+        )
+        # #endregion
         result = await Answerer(openrouter, retriever=retriever).answer(user_text, is_admin=admin)
     except OpenRouterError as exc:
+        # #region agent log
+        agent_debug_log(
+            location="src/noteturner/bot/handlers/assistant.py:271",
+            message="Assistant answerer failed with OpenRouterError",
+            data={
+                "chat_id": message.chat.id,
+                "error": str(exc),
+            },
+            hypothesis_id="D",
+            run_id="user-repro",
+        )
+        # #endregion
         await message.answer(f"Ошибка OpenRouter: {exc}")
         return
 
     await message.answer(result.text)
+    # #region agent log
+    agent_debug_log(
+        location="src/noteturner/bot/handlers/assistant.py:285",
+        message="Assistant sent reply",
+        data={
+            "chat_id": message.chat.id,
+            "model": result.model,
+            "tier": result.tier,
+            "reply_len": len(result.text or ""),
+        },
+        hypothesis_id="E",
+        run_id="user-repro",
+    )
+    # #endregion
     await _log_query(message.chat.id, user_text, result.model)

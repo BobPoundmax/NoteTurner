@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Any
 
 
-DEBUG_LOG_PATH = Path("debug-52833e.log")
-DEBUG_SESSION_ID = "52833e"
+DEBUG_LOG_PATH = Path("debug-ee53df.log")
+DEBUG_SESSION_ID = "ee53df"
 
 
 def agent_debug_log(

@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 
+from noteturner.debug_runtime import agent_debug_log
 from noteturner.integrations.openrouter import OpenRouterClient, OpenRouterError
 from noteturner.services.llm.prompts import PromptBuilder
 from noteturner.services.llm.retriever import (
@@ -75,6 +76,22 @@ class Answerer:
     async def answer(self, question: str, *, is_admin: bool) -> AnswerResult:
         tier = self._router.classify(question)
         context = await self._retriever.retrieve(question, include_financial=is_admin)
+        # #region agent log
+        agent_debug_log(
+            location="src/noteturner/services/llm/answerer.py:81",
+            message="Answerer retrieved context",
+            data={
+                "question_len": len(question or ""),
+                "is_admin": is_admin,
+                "tier": tier,
+                "context_count": len(context),
+                "context_sources": [chunk.source_type or chunk.source for chunk in context[:3]],
+                "context_record_types": [chunk.record_type for chunk in context[:3]],
+            },
+            hypothesis_id="D",
+            run_id="user-repro",
+        )
+        # #endregion
         if not context:
             no_context_reply = self._no_context_reply(question, is_admin=is_admin)
             if no_context_reply is not None:
@@ -88,11 +105,38 @@ class Answerer:
                 reply = await self._openrouter.chat_completion(messages, model=model)
             except OpenRouterError as exc:
                 logger.warning("Model %s failed: %s", model, exc)
+                # #region agent log
+                agent_debug_log(
+                    location="src/noteturner/services/llm/answerer.py:106",
+                    message="Answerer model failed",
+                    data={
+                        "tier": tier,
+                        "model": model,
+                        "error": str(exc),
+                    },
+                    hypothesis_id="D",
+                    run_id="user-repro",
+                )
+                # #endregion
                 last_error = exc
                 continue
 
             if context and self._should_attach_sources(reply):
                 reply = f"{reply}\n\n{self._format_sources(context)}"
+            # #region agent log
+            agent_debug_log(
+                location="src/noteturner/services/llm/answerer.py:123",
+                message="Answerer produced reply",
+                data={
+                    "tier": tier,
+                    "model": model,
+                    "reply_len": len(reply or ""),
+                    "attached_sources": bool(context and self._should_attach_sources(reply)),
+                },
+                hypothesis_id="D",
+                run_id="user-repro",
+            )
+            # #endregion
             return AnswerResult(text=reply, model=model, tier=tier)
 
         raise OpenRouterError(
